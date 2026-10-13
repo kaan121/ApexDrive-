@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "ApexDrive",
+    "slug": "apexdrive",
+    "version": "0.3.0",
+    "orientation": "portrait",
+    "icon": "./icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0F1523",
+    "ios": {
+      "bundleIdentifier": "com.apexdrive.app",
+      "infoPlist": {
+        "UIBackgroundModes": ["location"],
+        "NSLocationWhenInUseUsageDescription": "ApexDrive sürüş hızını, mesafeyi ve rotayı kaydetmek için konumunu kullanır.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Ekran kapalıyken de sürüşünü kaydetmek için konum gerekir.",
+        "NSPhotoLibraryUsageDescription": "Bölgeler için istediğin fotoğrafı seçebilmen için galeriye erişir."
+      }
+    },
+    "android": {
+      "package": "com.apexdrive.app",
+      "adaptiveIcon": { "foregroundImage": "./adaptive-icon.png", "backgroundColor": "#00264E" },
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION", "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_LOCATION"]
+    },
+    "plugins": [
+      ["expo-location", { "isAndroidBackgroundLocationEnabled": true, "isIosBackgroundLocationEnabled": true }],
+      "expo-image-picker"
+    ]
+  }
+}
