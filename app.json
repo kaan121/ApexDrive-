@@ -22,7 +22,7 @@
       "package": "com.apexdrive.app",
       "adaptiveIcon": {
         "foregroundImage": "./adaptive-icon.png",
-        "backgroundColor": "#00264E"
+        "backgroundColor": "#0B395F"
       },
       "permissions": [
         "ACCESS_FINE_LOCATION",
