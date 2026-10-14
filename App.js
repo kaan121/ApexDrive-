@@ -4,8 +4,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { GH_REPO, BUILD } from './repo';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, useColorScheme } from 'react-native';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SUPA_URL, SUPA_KEY } from './config';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -17,8 +17,10 @@ import { captureRef } from 'react-native-view-shot';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const C = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500' };
-const VKEY = '@apexdrive_vehicle', FKEY = '@apexdrive_friends', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
+const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: C.sel };
+const LIGHT = { bg: '#F2F2F7', card: '#FFFFFF', line: '#D8D8DE', text: '#111114', dim: '#6B6B75', accent: '#2A9D9D', warn: '#E68600', sel: '#CFE8E8' };
+let C = DARK, s = null, curTheme = '';
+const SKEY = '@apexdrive_settings', CKEY = '@apexdrive_cells', VKEY = '@apexdrive_vehicle', FKEY = '@apexdrive_friends', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
 
 const hav = (a, b) => {
   const R = 6371, r = Math.PI / 180;
@@ -79,7 +81,7 @@ const api = (path, opt = {}) => fetch(`${SUPA_URL}/rest/v1/${path}`, { ...opt, h
 const register = async (username, deviceId, car) => {
   if (!online) return 'ok';
   try {
-    const r = await api('profiles', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username, device_id: deviceId, car_brand: car.brand, car_model: car.model, car_year: car.year }) });
+    const r = await api('profiles', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username, device_id: deviceId, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) });
     return r.status === 409 ? 'taken' : r.ok ? 'ok' : 'err';
   } catch { return 'err'; }
 };
@@ -88,7 +90,7 @@ const syncProfile = (p, trips) => {
   if (!online) return;
   const tt = totals(trips), mk = monthKey(new Date()), car = p.car || {};
   const mkm = trips.filter((t) => monthKey(new Date(t.start)) === mk).reduce((a, t) => a + t.dist, 0);
-  api(`profiles?username=eq.${encodeURIComponent(p.username)}&device_id=eq.${p.deviceId}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year }) }).catch(() => {});
+  api(`profiles?username=eq.${encodeURIComponent(p.username)}&device_id=eq.${p.deviceId}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) }).catch(() => {});
 };
 
 // ---- Bileşenler ----
@@ -152,6 +154,7 @@ function Drive({ on, live, onStart, onStop }) {
 const CAR_MAP = Object.fromEntries(`Alfa Romeo:Giulia,Giulietta,Stelvio,Tonale,MiTo;Audi:A1,A3,A4,A5,A6,Q2,Q3,Q5,Q7,TT,RS3,RS6;BMW:1 Serisi,2 Serisi,3 Serisi,4 Serisi,5 Serisi,X1,X3,X5,M2,M3,M4,M5;Chevrolet:Aveo,Cruze,Captiva,Camaro,Corvette;Citroën:C3,C4,C5,C-Elysée,Berlingo;Cupra:Formentor,Leon,Born;Dacia:Duster,Sandero,Logan,Jogger,Spring;Fiat:Egea,Linea,Punto,500,Doblo,Panda,Tipo;Ford:Fiesta,Focus,Mondeo,Kuga,Puma,Mustang,Ranger,Courier;Honda:Civic,City,Accord,Jazz,CR-V,HR-V;Hyundai:i10,i20,i30,Elantra,Bayon,Tucson,Kona,Ioniq 5;Jeep:Renegade,Compass,Wrangler,Cherokee;Kia:Picanto,Rio,Ceed,Sportage,Sorento,Stonic,EV6;Land Rover:Defender,Discovery,Evoque,Range Rover;Mazda:2,3,6,CX-3,CX-5,MX-5;Mercedes-Benz:A Serisi,C Serisi,E Serisi,S Serisi,CLA,GLA,GLC,AMG GT;Mini:Cooper,Countryman;Mitsubishi:Lancer,ASX,L200,Outlander;Nissan:Micra,Juke,Qashqai,X-Trail,GT-R,370Z;Opel:Corsa,Astra,Insignia,Mokka,Crossland,Grandland;Peugeot:208,301,308,408,508,2008,3008;Porsche:911,Cayenne,Macan,Panamera,Taycan;Renault:Clio,Megane,Taliant,Captur,Kadjar,Austral,Symbol,Fluence,Talisman,Koleos;Seat:Ibiza,Leon,Arona,Ateca;Škoda:Fabia,Scala,Octavia,Superb,Kamiq,Karoq,Kodiaq;Subaru:Impreza,WRX,Forester,XV;Suzuki:Swift,Vitara,SX4,Jimny;Tesla:Model 3,Model S,Model X,Model Y;Toyota:Yaris,Corolla,Auris,C-HR,RAV4,Hilux,Supra,GR86;Togg:T10X;Volkswagen:Polo,Golf,Passat,Jetta,Tiguan,T-Roc,Arteon,Scirocco;Volvo:S60,S90,V40,XC40,XC60,XC90`.split(';').map((x) => { const [b, m] = x.split(':'); return [b, m.split(',')]; }));
 const BRANDS = Object.keys(CAR_MAP).sort((a, b) => a.localeCompare(b, 'tr'));
 const YEARS = Array.from({ length: 48 }, (_, i) => String(2027 - i));
+const MOTO_MAP = Object.fromEntries(`Aprilia:RS 660,Tuono 660,RSV4,Tuono V4;Benelli:TRK 502,Leoncino 500,302R;BMW:G 310 R,F 900 R,F 900 XR,R 1250 GS,R 1300 GS,S 1000 RR,S 1000 R;CFMOTO:250NK,450SR,650NK,800MT;Ducati:Monster,Panigale V2,Panigale V4,Multistrada V4,Streetfighter V4,Scrambler,Diavel;Harley-Davidson:Sportster S,Iron 883,Street Glide,Fat Boy,Road King;Honda:CBR250R,CBR500R,CBR650R,CBR1000RR,CB650R,CB125R,Africa Twin,PCX,Forza 350,Transalp;Husqvarna:Svartpilen 401,Vitpilen 401,Norden 901;Kawasaki:Ninja 250,Ninja 400,Ninja 650,ZX-6R,ZX-10R,Z650,Z900,Versys 650,Versys 1000;KTM:Duke 125,Duke 390,Duke 790,Duke 890,RC 390,390 Adventure,1290 Super Duke R;Kymco:Agility,Downtown,Xciting;Moto Guzzi:V7,V85 TT;MV Agusta:Brutale 800,F3;Royal Enfield:Classic 350,Himalayan,Interceptor 650,Continental GT 650,Meteor 350;Suzuki:GSX-R600,GSX-R750,GSX-R1000,GSX-S750,GSX-S1000,V-Strom 650,V-Strom 1050,Hayabusa,Burgman 400;SYM:Symphony,Joyride,Maxsym;Triumph:Street Triple,Speed Triple,Trident 660,Tiger 900,Tiger 1200,Bonneville T120,Daytona 660;Vespa:Primavera,GTS 300,Sprint;Yamaha:R25,R3,R6,R1,MT-03,MT-07,MT-09,Tracer 9,XMAX,NMAX,Tenere 700`.split(';').map((x) => { const [b, m] = x.split(':'); return [b, m.split(',')]; }));
 
 function Picker({ title, options, onPick, onClose }) {
   const [q, setQ] = useState('');
@@ -174,21 +177,27 @@ function Picker({ title, options, onPick, onClose }) {
 }
 
 function Welcome({ existing, onDone }) {
+  const [step, setStep] = useState(existing ? 1 : 0);
   const [name, setName] = useState('');
+  const [vt, setVt] = useState('car');
   const [car, setCar] = useState({ brand: '', model: '', year: '' });
   const [pick, setPick] = useState(null);
   const [busy, setBusy] = useState(false);
+  const map = vt === 'moto' ? MOTO_MAP : CAR_MAP;
+  const next = () => {
+    if (!/^[a-z0-9_.]{3,20}$/.test(name.trim().toLowerCase())) return Alert.alert('Geçersiz kullanıcı adı', '3-20 karakter olmalı; harf, rakam, _ ve . kullanabilirsin.');
+    setStep(1);
+  };
   const go = async () => {
-    const u = existing ? existing.username : name.trim().toLowerCase();
-    if (!existing && !/^[a-z0-9_.]{3,20}$/.test(u)) return Alert.alert('Geçersiz kullanıcı adı', '3-20 karakter olmalı; harf, rakam, _ ve . kullanabilirsin.');
-    if (!car.brand || !car.model || !car.year) return Alert.alert('Araç bilgisi eksik', 'Marka, model ve yılı seç.');
-    const c = { brand: car.brand, model: car.model, year: +car.year };
+    if (!car.brand || !car.model || !car.year) return Alert.alert('Eksik bilgi', 'Marka, model ve yılı seç.');
+    const c = { brand: car.brand, model: car.model, year: +car.year, vtype: vt };
     if (existing) return onDone({ ...existing, car: c });
+    const u = name.trim().toLowerCase();
     setBusy(true);
     const deviceId = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const res = await register(u, deviceId, c);
     setBusy(false);
-    if (res === 'taken') return Alert.alert('Bu kullanıcı adı alınmış', 'Başka bir tane dene.');
+    if (res === 'taken') { setStep(0); return Alert.alert('Bu kullanıcı adı alınmış', 'Başka bir tane dene.'); }
     if (res === 'err') return Alert.alert('Bağlanılamadı', 'İnternet bağlantını kontrol edip tekrar dene.');
     onDone({ username: u, deviceId, car: c });
   };
@@ -200,16 +209,41 @@ function Welcome({ existing, onDone }) {
   return (
     <ScrollView contentContainerStyle={{ padding: 24, paddingTop: 40 }} keyboardShouldPersistTaps="handled">
       <Image source={require('./icon.png')} style={s.logo} />
-      <Text style={s.title}>{existing ? 'Aracını seç' : "ApexDrive'a hoş geldin"}</Text>
-      {!existing && <TextInput style={s.input} value={name} onChangeText={setName} placeholder="kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} maxLength={20} />}
-      <Field label="Marka" value={car.brand} onPress={() => setPick('brand')} />
-      <Field label="Model" value={car.model} off={!car.brand} onPress={() => setPick('model')} />
-      <Field label="Yıl" value={car.year} onPress={() => setPick('year')} />
-      <TouchableOpacity style={s.btn} onPress={go} disabled={busy}><Text style={s.btnText}>{busy ? 'Kontrol ediliyor...' : 'Devam'}</Text></TouchableOpacity>
+      {step === 0 && (
+        <View>
+          <Text style={s.title}>ApexDrive'a hoş geldin</Text>
+          <Text style={s.itemSub}>Önce bir kullanıcı adı seç.</Text>
+          <TextInput style={s.input} value={name} onChangeText={setName} placeholder="kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} maxLength={20} />
+          <TouchableOpacity style={s.btn} onPress={next}><Text style={s.btnText}>Devam</Text></TouchableOpacity>
+        </View>
+      )}
+      {step === 1 && (
+        <View>
+          <Text style={s.title}>Ne sürüyorsun?</Text>
+          <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
+            {[['car', 'Araba'], ['moto', 'Motor']].map(([k, l]) => (
+              <TouchableOpacity key={k} style={[s.card, { alignItems: 'center', paddingVertical: 32 }, vt === k && { borderWidth: 2, borderColor: C.accent }]} onPress={() => { setVt(k); setCar({ brand: '', model: '', year: car.year }); setStep(2); }}>
+                {k === 'moto' ? <MaterialCommunityIcons name="motorbike" size={52} color={C.accent} /> : <Ionicons name="car-sport" size={52} color={C.accent} />}
+                <Text style={[s.itemTitle, { marginTop: 10 }]}>{l}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      )}
+      {step === 2 && (
+        <View>
+          <Text style={s.title}>{vt === 'moto' ? 'Motorunu seç' : 'Aracını seç'}</Text>
+          <Field label="Marka" value={car.brand} onPress={() => setPick('brand')} />
+          <Field label="Model" value={car.model} off={!car.brand} onPress={() => setPick('model')} />
+          <Field label="Yıl" value={car.year} onPress={() => setPick('year')} />
+          <TouchableOpacity style={s.btn} onPress={go} disabled={busy}><Text style={s.btnText}>{busy ? 'Kontrol ediliyor...' : 'Başla'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={() => setStep(1)}><Text style={{ color: C.accent, textAlign: 'center', padding: 14 }}>Geri</Text></TouchableOpacity>
+        </View>
+      )}
       {pick && (
         <Picker
           title={{ brand: 'Marka', model: 'Model', year: 'Yıl' }[pick]}
-          options={pick === 'brand' ? BRANDS : pick === 'model' ? CAR_MAP[car.brand] || [] : YEARS}
+          options={pick === 'brand' ? Object.keys(map).sort((a, b) => a.localeCompare(b, 'tr')) : pick === 'model' ? map[car.brand] || [] : YEARS}
           onClose={() => setPick(null)}
           onPick={(v) => { setCar(pick === 'brand' ? { brand: v, model: '', year: car.year } : { ...car, [pick]: v }); setPick(null); }}
         />
@@ -344,7 +378,7 @@ function Board({ me, friends, addFriend }) {
   );
 }
 
-function Profile({ me, trips, terr, onAvatar, onDelete }) {
+function Profile({ me, trips, terr, prefs, setPrefs, onAvatar, onDelete }) {
   const [sel, setSel] = useState(null);
   const [settings, setSettings] = useState(false);
   if (sel) return <Detail t={sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} />;
@@ -394,7 +428,7 @@ function Profile({ me, trips, terr, onAvatar, onDelete }) {
         <Card icon="swap-horizontal" color={C.dim} label="Ort. Trip Uzunluğu" value={(tt.n ? tt.dist / tt.n : 0).toFixed(1)} unit="km" />
         <Card wide icon="map" color="#BF5AF2" label="Ele Geçirilen Bölge" value={terr} />
       </Grid>
-      {settings && <SettingsModal onClose={() => setSettings(false)} />}
+      {settings && <SettingsModal prefs={prefs} setPrefs={setPrefs} onClose={() => setSettings(false)} />}
       <Text style={s.sec}>Sürüşlerim</Text>
       {trips.length === 0 && <Text style={s.hint}>Henüz sürüş yok. Sağ alttaki oynat tuşuyla başlat.</Text>}
       {trips.map((t) => (
@@ -433,11 +467,25 @@ for(var r=r0;r<=r1;r++){var q0=Math.floor(p1[0]/(S*Math.sqrt(3))-r/2)-1,q1=Math.
 for(var q=q0;q<=q1;q++){if(!set[q+':'+r])L.polygon(hexPoly(q,r),{color:'#7DD3D8',weight:1,opacity:.35,fill:false,interactive:false}).addTo(gg);}}}}
 map.on('moveend',function(){if(gridOn)draw();});
 window.setCells=function(a,g){ks=a;gridOn=!!g;draw();};
+var rI=0,rT=null,rM=null,rR=4,pg=L.layerGroup().addTo(map);
+function post(o){window.ReactNativeWebView.postMessage(JSON.stringify(o));}
+window.rpPause=function(){clearInterval(rT);rT=null;};
+window.rpRate=function(r){rR=r;};
+window.rpPlay=function(r){rR=r;if(rT||pts.length<2)return;if(rI>=pts.length-1)rI=0;
+if(!rM)rM=L.circleMarker([pts[0][0],pts[0][1]],{radius:9,color:'#fff',weight:3,fillColor:'#FF2D55',fillOpacity:1}).addTo(map);
+map.setView([pts[Math.floor(rI)][0],pts[Math.floor(rI)][1]],16,{animate:false});var n=0;
+rT=setInterval(function(){var p=pts[Math.floor(rI)],v=Math.max(p[2]||40,15);rI+=v/3.6/10*0.06*rR;
+if(rI>=pts.length-1){rI=pts.length-1;window.rpPause();post({t:'end',i:rI,n:pts.length});}
+p=pts[Math.floor(rI)];rM.setLatLng([p[0],p[1]]);map.setView([p[0],p[1]],map.getZoom(),{animate:false});
+if(++n%4===0)post({t:'tick',i:Math.floor(rI),n:pts.length,v:p[2]});},60);};
+window.setPeople=function(a){pg.clearLayers();a.forEach(function(p){
+var ic=L.divIcon({className:'',html:'<div style="width:38px;height:38px;border-radius:19px;background:#1C1C21;border:3px solid '+(p.s?'#FF2D55':'#6EC7C7')+';color:#fff;font:700 15px sans-serif;display:flex;align-items:center;justify-content:center">'+p.u[0].toUpperCase()+'</div>',iconSize:[38,38]});
+L.marker([p.lat,p.lon],{icon:ic}).on('click',function(){post({t:'person',u:p.u});}).addTo(pg);});};
 window.fit=function(){if(pts.length>1)map.fitBounds(L.latLngBounds(pts.map(function(q){return [q[0],q[1]];})),{padding:[30,30],animate:false});};
 window.setMe=function(la,lo,go){var ll=[la,lo];if(!me)me=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#6EC7C7',fillOpacity:1}).addTo(map);else me.setLatLng(ll);if(go)map.setView(ll,Math.max(map.getZoom(),15),{animate:true});};
 </script></body></html>`;
 
-function LeafletMap({ route, cells, grid, sat, me, follow, fit, interactive = true, onMove, style }) {
+function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me, follow, fit, interactive = true, onMove, style }) {
   const ref = useRef(null);
   const [ready, setReady] = useState(false);
   const html = useRef(leafletHtml(interactive)).current;
@@ -449,6 +497,8 @@ function LeafletMap({ route, cells, grid, sat, me, follow, fit, interactive = tr
   }, [ready, route]);
   useEffect(() => { if (ready) run(`setCells(${JSON.stringify(cells || [])},${!!grid})`); }, [ready, cells, grid]);
   useEffect(() => { if (ready) run(`setSat(${!!sat})`); }, [ready, sat]);
+  useEffect(() => { if (ready) run(`setPeople(${JSON.stringify(people || [])})`); }, [ready, people]);
+  useEffect(() => { if (ready && cmd) run(cmd.js); }, [cmd]);
   useEffect(() => { if (ready && me) run(`setMe(${me.latitude},${me.longitude},${!!follow})`); }, [ready, me, follow]);
   return (
     <WebView
@@ -457,7 +507,7 @@ function LeafletMap({ route, cells, grid, sat, me, follow, fit, interactive = tr
       originWhitelist={['*']}
       source={{ html, baseUrl: 'https://apexdrive.app' }}
       onLoadEnd={() => setReady(true)}
-      onMessage={(e) => { try { const m = JSON.parse(e.nativeEvent.data); onMove && onMove(m.lat, m.lng); } catch {} }}
+      onMessage={(e) => { try { const m = JSON.parse(e.nativeEvent.data); if (m.t === 'person') onPerson && onPerson(m.u); else if (m.t) onTick && onTick(m); else onMove && onMove(m.lat, m.lng); } catch {} }}
       scrollEnabled={false}
       nestedScrollEnabled
       overScrollMode="never"
@@ -488,11 +538,27 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
   );
 }
 
-function MapTab({ route, cells, on, region, regions, name, pickPhoto, delPhoto, onPan }) {
+function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, delPhoto, onPan }) {
   const [me, setMe] = useState(null);
   const [seen, setSeen] = useState(false);
   const [mode, setMode] = useState('cells');
   const [sat, setSat] = useState(false);
+  const [people, setPeople] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false);
+  useEffect(() => {
+    if (mode !== 'stories' || !online || !me) return;
+    const load = async () => {
+      try {
+        const b = `lat=gte.${me.latitude - 0.5}&lat=lte.${me.latitude + 0.5}&lon=gte.${me.longitude - 0.5}&lon=lte.${me.longitude + 0.5}`;
+        const pr = await (await api(`presence?${b}&updated_at=gte.${new Date(Date.now() - 900000).toISOString()}&select=username,lat,lon`)).json();
+        const st = await (await api(`stories?${b}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&select=username,lat,lon`)).json();
+        const m = {};
+        (Array.isArray(pr) ? pr : []).forEach((p) => { m[p.username] = { u: p.username, lat: p.lat, lon: p.lon, s: 0 }; });
+        (Array.isArray(st) ? st : []).forEach((p) => { m[p.username] = { ...(m[p.username] || { u: p.username, lat: p.lat, lon: p.lon }), s: 1 }; });
+        setPeople(Object.values(m));
+      } catch {}
+    };
+    load(); const id = setInterval(load, 30000); return () => clearInterval(id);
+  }, [mode, !!me]);
   useEffect(() => {
     let sub;
     Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 10 }, (l) => setMe({ latitude: l.coords.latitude, longitude: l.coords.longitude }))
@@ -502,15 +568,22 @@ function MapTab({ route, cells, on, region, regions, name, pickPhoto, delPhoto, 
   useEffect(() => { if (me && !seen) { setSeen(true); onPan(me.latitude, me.longitude); } }, [me]);
   return (
     <View style={s.map}>
-      <LeafletMap style={s.map} route={mode === 'route' ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} sat={sat} />
+      <LeafletMap style={s.map} route={mode === 'route' ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} sat={sat} people={mode === 'stories' ? people : EMPTY} onPerson={setPerson} />
       {mode === 'photos' && <PhotosView regions={regions} cur={region} pickPhoto={pickPhoto} delPhoto={delPhoto} />}
       <View style={s.seg}>
-        {[['route', 'Rota'], ['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım']].map(([k, l]) => (
+        {[['route', 'Rota'], ['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım'], ['stories', 'Hikayeler']].map(([k, l]) => (
           <TouchableOpacity key={k} style={[s.segBtn, mode === k && s.segActive]} onPress={() => setMode(k)}>
             <Text style={[s.segText, mode === k && { color: C.text }]}>{l}</Text>
           </TouchableOpacity>
         ))}
       </View>
+      {mode === 'stories' && (online ? (
+        <TouchableOpacity style={s.storyBtn} onPress={() => (me ? setComposer(true) : Alert.alert('Konum bulunamadı', 'Konum izni verip biraz bekle.'))}>
+          <Ionicons name="add-circle" size={22} color="#06101F" /><Text style={s.btnText}>Hikaye paylaş</Text>
+        </TouchableOpacity>
+      ) : <View style={s.terr}><Text style={s.itemSub}>Hikayeler için sunucu bağlantısı gerekli.</Text></View>)}
+      {person && <PersonSheet u={person} onClose={() => setPerson(null)} />}
+      {composer && <StoryComposer me={profile} pos={me} onClose={() => setComposer(false)} />}
       {mode !== 'photos' && <TouchableOpacity style={s.satBtn} onPress={() => setSat(!sat)}><Ionicons name={sat ? 'map' : 'earth'} size={22} color={C.text} /></TouchableOpacity>}
       {region && mode !== 'photos' && (
         <TouchableOpacity style={s.chip} onPress={() => pickPhoto(region.key)}>
@@ -565,7 +638,7 @@ function RouteSvg({ route, w, h, rs = 0, color = '#fff' }) {
 
 const Chips = ({ opts, val, onPick }) => (
   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
-    {opts.map(([l, v]) => <TouchableOpacity key={String(v)} style={[s.fpill, val === v && { backgroundColor: '#2E4545' }]} onPress={() => onPick(v)}><Text style={s.navText}>{l}</Text></TouchableOpacity>)}
+    {opts.map(([l, v]) => <TouchableOpacity key={String(v)} style={[s.fpill, val === v && { backgroundColor: C.sel }]} onPress={() => onPick(v)}><Text style={s.navText}>{l}</Text></TouchableOpacity>)}
   </View>
 );
 
@@ -691,7 +764,253 @@ function VehicleTab({ me, docs, setDocs, rem, setRem }) {
 }
 
 // ---- Ayarlar / tek tıkla güncelleme ----
-function SettingsModal({ onClose }) {
+function ReplayBox({ t }) {
+  const [sat, setSat] = useState(true), [playing, setPlaying] = useState(false), [rate, setRate] = useState(4), [cmd, setCmd] = useState(null), [info, setInfo] = useState({ i: 0, n: 1, v: 0 });
+  const send = (js) => setCmd({ js, k: Math.random() });
+  const toggle = () => { if (playing) { send('rpPause()'); setPlaying(false); } else { send(`rpPlay(${rate})`); setPlaying(true); } };
+  return (
+    <View style={{ marginBottom: 12 }}>
+      <LeafletMap route={t.route} fit interactive={false} sat={sat} cmd={cmd} style={{ height: 300, borderRadius: 26 }} onTick={(m) => { if (m.t === 'end') setPlaying(false); setInfo((p) => ({ ...p, ...m })); }} />
+      <View style={s.rbar}><View style={[s.rfill, { width: `${Math.min(100, (info.i / Math.max(1, info.n - 1)) * 100)}%` }]} /></View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6 }}>
+        <TouchableOpacity style={s.fab} onPress={toggle}><Ionicons name={playing ? 'pause' : 'play'} size={26} color={C.accent} /></TouchableOpacity>
+        <View style={{ flex: 1 }}><Chips opts={[['1×', 1], ['4×', 4], ['16×', 16]]} val={rate} onPick={(v) => { setRate(v); if (playing) send(`rpRate(${v})`); }} /></View>
+        <TouchableOpacity style={s.fab} onPress={() => setSat(!sat)}><Ionicons name={sat ? 'map' : 'earth'} size={22} color={C.text} /></TouchableOpacity>
+      </View>
+      <Text style={[s.itemSub, { marginTop: 8 }]}>Hız: {Math.round(info.v || 0)} km/s</Text>
+    </View>
+  );
+}
+
+function PersonSheet({ u, onClose }) {
+  const [pr, setPr] = useState(null), [st, setSt] = useState([]), [big, setBig] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        setPr((await (await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year`)).json())[0] || { username: u });
+        setSt(await (await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at`)).json());
+      } catch {}
+    })();
+  }, [u]);
+  return (
+    <>
+      <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+        <View style={s.modalBg}>
+          <View style={s.modal}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <View style={[s.pAv, { width: 56, height: 56, borderRadius: 28 }]}><Text style={s.pLetter}>{u[0].toUpperCase()}</Text></View>
+              <View style={{ flex: 1 }}><Text style={s.name}>{u}</Text><Text style={s.itemSub}>{pr?.car_brand ? `${pr.car_brand} ${pr.car_model} · ${pr.car_year || ''}` : ''}</Text></View>
+            </View>
+            {pr?.total_km != null && <Text style={[s.itemSub, { marginTop: 10 }]}>{pr.total_km.toFixed(0)} km · {pr.trips} sürüş · maks. {Math.round(pr.top_speed)} km/s</Text>}
+            <Text style={s.sec}>Hikayeler (24 saat)</Text>
+            <ScrollView horizontal>
+              {(!Array.isArray(st) || st.length === 0) && <Text style={s.hint}>Aktif hikaye yok.</Text>}
+              {Array.isArray(st) && st.map((x) => <TouchableOpacity key={x.id} onPress={() => setBig(x)}><Image source={{ uri: x.img }} style={s.sthumb} /></TouchableOpacity>)}
+            </ScrollView>
+            <TouchableOpacity style={[s.btn, { backgroundColor: C.line }]} onPress={onClose}><Text style={[s.btnText, { color: C.text }]}>Kapat</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+      {big && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}>
+          <TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}>
+            <Image source={{ uri: big.img }} style={{ width: '100%', height: '75%' }} resizeMode="contain" />
+            <Text style={{ color: '#fff', textAlign: 'center', marginTop: 12, fontSize: 16 }}>{big.caption}</Text>
+          </TouchableOpacity>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function StoryComposer({ me, pos, onClose }) {
+  const [img, setImg] = useState(null), [cap, setCap] = useState(''), [busy, setBusy] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [4, 5] });
+        if (r.canceled) onClose(); else setImg(`data:image/jpeg;base64,${r.assets[0].base64}`);
+      } catch { onClose(); }
+    })();
+  }, []);
+  const post = async () => {
+    if (img.length > 900000) return Alert.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
+    setBusy(true);
+    try {
+      await api('stories?created_at=lt.' + new Date(Date.now() - 864e5).toISOString(), { method: 'DELETE' });
+      const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: cap.trim(), img }) });
+      if (!r.ok) throw 0;
+      onClose();
+    } catch { Alert.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
+    setBusy(false);
+  };
+  if (!img) return null;
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
+          <Text style={s.title}>Hikaye paylaş</Text>
+          <Image source={{ uri: img }} style={{ width: '100%', aspectRatio: 0.8, borderRadius: 24 }} />
+          <TextInput style={s.input} value={cap} onChangeText={setCap} placeholder="Bir şey yaz (isteğe bağlı)" placeholderTextColor={C.dim} maxLength={120} />
+          <Text style={s.hint}>Hikaye 24 saat görünür ve yaklaşık konumunla (≈1 km) paylaşılır.</Text>
+          <TouchableOpacity style={s.btn} onPress={post} disabled={busy}><Text style={s.btnText}>{busy ? 'Paylaşılıyor...' : 'Paylaş'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, textAlign: 'center', padding: 14 }}>Vazgeç</Text></TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function ClubView({ club, me, onBack }) {
+  const [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [txt, setTxt] = useState('');
+  const isM = mem.some((m) => m.username === me.username);
+  const load = async () => {
+    try {
+      const names = (await (await api(`club_members?club_id=eq.${club.id}&select=username`)).json()).map((m) => m.username);
+      const pr = names.length ? await (await api(`profiles?username=in.(${names.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`)).json() : [];
+      setMem(names.map((u) => ({ username: u, ...(pr.find((p) => p.username === u) || {}) })).sort((a, b) => (b.total_km || 0) - (a.total_km || 0)));
+      setPosts(await (await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=50&select=username,body,created_at`)).json());
+    } catch {}
+  };
+  useEffect(() => { load(); }, []);
+  const toggle = async () => {
+    try {
+      if (isM) await api(`club_members?club_id=eq.${club.id}&username=eq.${me.username}`, { method: 'DELETE' });
+      else await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username }) });
+      load();
+    } catch {}
+  };
+  const post = async () => {
+    if (!txt.trim()) return;
+    try { await api('club_posts', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username, body: txt.trim() }) }); setTxt(''); load(); } catch {}
+  };
+  return (
+    <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
+      <TouchableOpacity onPress={onBack}><Text style={{ color: C.accent, marginBottom: 10 }}>Geri</Text></TouchableOpacity>
+      <Text style={s.title}>{club.name}</Text>
+      {!!club.about && <Text style={[s.itemSub, { marginBottom: 12 }]}>{club.about}</Text>}
+      <TouchableOpacity style={[s.btn, { marginTop: 0 }, isM && { backgroundColor: C.card }]} onPress={toggle}><Text style={[s.btnText, isM && { color: '#FF6B6B' }]}>{isM ? 'Kulüpten ayrıl' : 'Kulübe katıl'}</Text></TouchableOpacity>
+      <Text style={s.sec}>Üyeler ({mem.length})</Text>
+      {mem.slice(0, 10).map((m, i) => (
+        <View key={m.username} style={[s.item, { flexDirection: 'row', alignItems: 'center' }]}>
+          <Text style={s.rank}>{i + 1}</Text>
+          <View style={{ flex: 1 }}><Text style={s.itemTitle}>{m.username}</Text><Text style={s.itemSub}>{m.car_brand ? `${m.car_brand} ${m.car_model}` : ''}</Text></View>
+          <Text style={s.itemTitle}>{(m.total_km || 0).toFixed(0)} km</Text>
+        </View>
+      ))}
+      <Text style={s.sec}>Kulüp alanı</Text>
+      {isM ? (
+        <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
+          <TextInput style={[s.input, { flex: 1, marginTop: 0 }]} value={txt} onChangeText={setTxt} placeholder="Kulübe bir şey yaz" placeholderTextColor={C.dim} maxLength={300} />
+          <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={post}><Ionicons name="send" size={18} color="#06101F" /></TouchableOpacity>
+        </View>
+      ) : <Text style={s.hint}>Paylaşım yapmak için kulübe katıl.</Text>}
+      {Array.isArray(posts) && posts.map((p, i) => (
+        <View key={i} style={s.item}><Text style={s.itemTitle}>{p.username}</Text><Text style={[s.itemSub, { color: C.text }]}>{p.body}</Text><Text style={s.itemSub}>{fmtDate(p.created_at)}</Text></View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function ClubsScreen({ me, onClose }) {
+  const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState('');
+  const load = async () => {
+    if (!online) return;
+    try {
+      const c = await (await api('clubs?select=id,name,about,vtype,owner&order=created_at.desc&limit=100')).json();
+      setClubs(Array.isArray(c) ? c : []);
+      const m = await (await api(`club_members?username=eq.${me.username}&select=club_id`)).json();
+      setMine(Array.isArray(m) ? m.map((x) => x.club_id) : []);
+    } catch {}
+  };
+  useEffect(() => { load(); }, []);
+  const create = async () => {
+    const n = nm.trim();
+    if (n.length < 3) return Alert.alert('Kulüp adı en az 3 karakter olmalı');
+    try {
+      const r = await api('clubs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: n, about: ab.trim(), vtype: me.car?.vtype || 'car', owner: me.username }) });
+      if (r.status === 409) return Alert.alert('Bu kulüp adı alınmış');
+      const [c] = await r.json();
+      await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username }) });
+      setMk(false); setNm(''); setAb(''); load(); setSel(c);
+    } catch { Alert.alert('Kulüp oluşturulamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
+  };
+  const list = clubs.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        {!online ? (
+          <View style={{ padding: 20 }}><Text style={s.title}>Kulüpler</Text><Text style={s.itemSub}>Kulüpler için sunucu bağlantısı gerekli.</Text><TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, padding: 16 }}>Kapat</Text></TouchableOpacity></View>
+        ) : sel ? (
+          <ClubView club={sel} me={me} onBack={() => { setSel(null); load(); }} />
+        ) : (
+          <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Kulüpler</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+            <TextInput style={[s.input, { marginTop: 0, marginBottom: 12 }]} value={q} onChangeText={setQ} placeholder="Kulüp ara" placeholderTextColor={C.dim} />
+            <TouchableOpacity style={[s.btn, { marginTop: 0, marginBottom: 12 }]} onPress={() => setMk(!mk)}><Text style={s.btnText}>{mk ? 'Vazgeç' : 'Yeni kulüp kur'}</Text></TouchableOpacity>
+            {mk && (
+              <View style={[s.card, { marginBottom: 12, flexBasis: undefined }]}>
+                <TextInput style={[s.input, { marginTop: 0 }]} value={nm} onChangeText={setNm} placeholder="Kulüp adı" placeholderTextColor={C.dim} maxLength={40} />
+                <TextInput style={s.input} value={ab} onChangeText={setAb} placeholder="Kısa açıklama (marka, şehir, tarz...)" placeholderTextColor={C.dim} maxLength={140} />
+                <TouchableOpacity style={s.btn} onPress={create}><Text style={s.btnText}>Kur</Text></TouchableOpacity>
+              </View>
+            )}
+            {list.length === 0 && <Text style={s.hint}>Henüz kulüp yok. İlkini sen kur.</Text>}
+            {list.map((c) => (
+              <TouchableOpacity key={c.id} style={s.item} onPress={() => setSel(c)}>
+                <Text style={s.itemTitle}>{c.name}{mine.includes(c.id) ? '  ✓' : ''}</Text>
+                <Text style={s.itemSub}>{c.vtype === 'moto' ? 'Motor' : 'Araba'}{c.about ? ' · ' + c.about : ''}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const MODS = [
+  ['Renk', [['Stok', ''], ['Mat siyah', 'matte black paint'], ['Beyaz', 'pearl white paint'], ['Kırmızı', 'candy red paint'], ['Mavi', 'metallic blue paint'], ['Mat gri', 'matte grey wrap'], ['Turuncu', 'orange paint'], ['Yeşil', 'racing green paint']]],
+  ['Jant', [['Stok', ''], ['Siyah jant', 'black alloy wheels'], ['Altın jant', 'gold forged wheels'], ['Büyük krom', 'large chrome wheels']]],
+  ['Gövde kiti', [['Stok', ''], ['Geniş kasa', 'wide body kit'], ['Spoyler', 'big rear wing spoiler'], ['Karbon parça', 'carbon fiber aero parts']]],
+  ['Duruş', [['Stok', ''], ['Alçaltılmış', 'lowered stance'], ['Yükseltilmiş', 'lifted off-road stance']]],
+  ['Ortam', [['Gün batımı yol', 'on a coastal road at sunset'], ['Gece şehir', 'in a neon city at night'], ['Pist', 'on a race track'], ['Stüdyo', 'in a clean photo studio']]],
+];
+function ModStudio({ me, onClose }) {
+  const [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [url, setUrl] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(false);
+  const car = me.car || {};
+  const gen = () => {
+    const parts = MODS.map(([k, o]) => o[sel[k] || 0][1]).filter(Boolean);
+    const prompt = `${car.year || ''} ${car.brand || ''} ${car.model || ''} ${car.vtype === 'moto' ? 'motorcycle' : 'car'}, ${parts.join(', ')}${extra.trim() ? ', ' + extra.trim() : ''}, photorealistic, ultra detailed, 35mm photo`;
+    setErr(false); setBusy(true);
+    setUrl(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&nologo=true&model=flux&seed=${Math.floor(Math.random() * 1e6)}`);
+  };
+  const share = async () => { try { const f = await FileSystem.downloadAsync(url, FileSystem.cacheDirectory + 'apex-mod.jpg'); await Sharing.shareAsync(f.uri); } catch { Alert.alert('Paylaşılamadı', 'Görsel indirilemedi.'); } };
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Modifiye (AI)</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <Text style={s.itemSub}>{car.brand} {car.model} {car.year}</Text>
+          {MODS.map(([k, o]) => (<View key={k}><Text style={[s.itemSub, { marginTop: 14 }]}>{k}</Text><Chips opts={o.map(([l], i) => [l, i])} val={sel[k] || 0} onPick={(i) => setSel({ ...sel, [k]: i })} /></View>))}
+          <TextInput style={s.input} value={extra} onChangeText={setExtra} placeholder="Ek istek (ör. mat siyah kaput, neon altı)" placeholderTextColor={C.dim} />
+          <TouchableOpacity style={s.btn} onPress={gen} disabled={busy}><Text style={s.btnText}>{busy ? 'Üretiliyor...' : 'Görselleştir'}</Text></TouchableOpacity>
+          {url && (
+            <View style={{ marginTop: 16 }}>
+              {busy && <ActivityIndicator color={C.accent} style={{ marginBottom: 8 }} />}
+              <Image source={{ uri: url }} style={{ width: '100%', aspectRatio: 4 / 3, borderRadius: 24, backgroundColor: C.card }} onLoadEnd={() => setBusy(false)} onError={() => { setBusy(false); setErr(true); }} />
+              {err && <Text style={s.hint}>Görsel üretilemedi. Ücretsiz servis yoğun olabilir, birkaç saniye bekleyip tekrar dene.</Text>}
+              {!busy && !err && <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={share}><Text style={[s.btnText, { color: C.accent }]}>Paylaş</Text></TouchableOpacity>}
+            </View>
+          )}
+          <Text style={s.hint}>Ücretsiz AI servisi kullanılır: uygulamada sayı sınırı yok, ama servis art arda isteklerde ~15 sn bekletebilir. Görsel, aracının bir yorumudur; kendi fotoğrafını birebir düzenlemez.</Text>
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function SettingsModal({ prefs, setPrefs, onClose }) {
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const check = async () => {
@@ -714,22 +1033,22 @@ function SettingsModal({ onClose }) {
     setSt('new');
   };
   const msg = { idle: '', checking: 'Kontrol ediliyor...', latest: 'En son sürümü kullanıyorsun.', err: 'Kontrol edilemedi. İnternetini kontrol et.', norepo: 'Güncelleme adresi tanımlı değil. Derleme dosyasını güncelleyip yeniden derlemen gerekiyor.', busy: 'İndiriliyor, kurulum ekranı açılacak...', new: rel ? `Yeni sürüm hazır (#${rel.n}).` : '' }[st];
+  const Box = ({ title, sub, children }) => <View style={[s.card, { marginBottom: 12, flexBasis: undefined }]}><Text style={s.itemTitle}>{title}</Text>{!!sub && <Text style={[s.itemSub, { marginTop: 4 }]}>{sub}</Text>}{children}</View>;
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
-        <View style={{ padding: 20 }}>
+        <ScrollView contentContainerStyle={{ padding: 20 }}>
           <Text style={s.title}>Ayarlar</Text>
-          <View style={s.card}>
-            <Text style={s.itemTitle}>Güncelleme</Text>
-            <Text style={[s.itemSub, { marginTop: 6 }]}>Kurulu sürüm: derleme #{BUILD}</Text>
+          <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
+          <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
+          <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+          <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}`}>
             {!!msg && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{msg}</Text>}
-            <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}>
-              <Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text>
-            </TouchableOpacity>
+            <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
             {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
-          </View>
+          </Box>
           <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, textAlign: 'center', padding: 18 }}>Kapat</Text></TouchableOpacity>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     </Modal>
   );
@@ -741,7 +1060,7 @@ function Detail({ t, onBack, onDelete }) {
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
       <TouchableOpacity onPress={onBack}><Text style={{ color: C.accent, marginBottom: 12 }}>Geri</Text></TouchableOpacity>
       <Text style={s.h1}>{fmtDate(t.start)}</Text>
-      {t.route?.length > 1 && <LeafletMap route={t.route} fit interactive={false} style={{ height: 260, borderRadius: 26, marginBottom: 12 }} />}
+      {t.route?.length > 1 ? <ReplayBox t={t} /> : <Text style={[s.hint, { marginBottom: 12 }]}>Bu sürüşün rota kaydı, saklama süresi dolduğu için silindi.</Text>}
       <SpeedDist route={t.route} />
       <TripStats t={t} />
       <TouchableOpacity style={s.btn} onPress={() => setSharing(true)}><Text style={s.btnText}>Sürüşü paylaş</Text></TouchableOpacity>
@@ -754,6 +1073,13 @@ function Detail({ t, onBack, onDelete }) {
 }
 
 export default function App() {
+  const sysScheme = useColorScheme();
+  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false });
+  const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
+  if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
+  const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
+  const pLoaded = useRef(false);
+  const [pReady, setPReady] = useState(false);
   const [tab, setTab] = useState('drive');
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
@@ -868,8 +1194,36 @@ export default function App() {
       if (!res.canceled) saveProfile({ ...profile, avatar: `data:image/jpeg;base64,${res.assets[0].base64}` });
     } catch {}
   };
-  const tripCells = useMemo(() => cellsOf(trips.map((t) => t.route || [])), [trips]);
-  const cells = useMemo(() => [...new Set([...tripCells, ...cellsOf([route])])], [tripCells, route]);
+  useEffect(() => { AsyncStorage.getItem(CKEY).then((v) => v && setCellStore((p) => [...new Set([...JSON.parse(v), ...p])])).catch(() => {}); }, []);
+  useEffect(() => {
+    const add = cellsOf(trips.map((t) => t.route || []));
+    if (!add.length) return;
+    setCellStore((p) => { const n = [...new Set([...p, ...add])]; if (n.length === p.length) return p; AsyncStorage.setItem(CKEY, JSON.stringify(n)).catch(() => {}); return n; });
+  }, [trips]);
+  useEffect(() => {
+    if (!pReady) return;
+    const lim = Date.now() - prefs.keepDays * 864e5;
+    if (trips.some((t) => t.route && t.route.length && t.start < lim)) {
+      const n = trips.map((t) => (t.start < lim ? { ...t, route: [], pruned: true } : t));
+      setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
+    }
+  }, [trips, prefs.keepDays, pReady]);
+  useEffect(() => {
+    AsyncStorage.getItem(SKEY).then((v) => { pLoaded.current = true; if (v) setPrefs((p) => ({ ...p, ...JSON.parse(v) })); setPReady(true); }).catch(() => { pLoaded.current = true; setPReady(true); });
+  }, []);
+  useEffect(() => { if (pLoaded.current) AsyncStorage.setItem(SKEY, JSON.stringify(prefs)).catch(() => {}); }, [prefs]);
+  useEffect(() => {
+    if (!online || !profile) return;
+    if (!prefs.visible) { api(`presence?username=eq.${profile.username}`, { method: 'DELETE' }).catch(() => {}); return; }
+    const push = async () => {
+      try {
+        const p = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(2), lon: +p.coords.longitude.toFixed(2), car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', updated_at: new Date().toISOString() }) });
+      } catch {}
+    };
+    push(); const id = setInterval(push, 120000); return () => clearInterval(id);
+  }, [prefs.visible, profile?.username]);
+  const cells = useMemo(() => [...new Set([...cellStore, ...cellsOf([route])])], [cellStore, route]);
   const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
   useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setVdocs(j.docs || {}); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
@@ -883,19 +1237,23 @@ export default function App() {
   const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); };
 
   if (profile === undefined) return <View style={s.root} />;
-  if (profile === null) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style="light" /><Welcome onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
-  if (!profile.car) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style="light" /><Welcome existing={profile} onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
+  if (profile === null) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
+  if (!profile.car) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome existing={profile} onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
   const TABS = [['drive', 'speedometer', 'Sürüş'], ['map', 'map', 'Harita'], ['board', 'trophy', 'Sıralama'], ['vehicle', 'car-sport', 'Araç'], ['profile', 'person', 'Profil']];
   return (
     <SafeAreaProvider>
       <SafeAreaView style={s.root}>
-        <StatusBar style="light" />
+        <StatusBar style={C === LIGHT ? 'dark' : 'light'} />
+        <View style={s.hdr}>
+          <TouchableOpacity onPress={() => setMenu(true)} style={{ padding: 6 }}><Ionicons name="menu" size={28} color={C.text} /></TouchableOpacity>
+          <Text style={s.hdrT}>ApexDrive</Text>
+        </View>
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
-          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
+          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={vdocs} setDocs={setVdocs} rem={rem} setRem={setRem} />}
-          {tab === 'profile' && <Profile me={profile} trips={trips} terr={tripCells.length} onAvatar={pickAvatar} onDelete={del} />}
+          {tab === 'profile' && <Profile me={profile} trips={trips} terr={cellStore.length} prefs={prefs} setPrefs={setPrefs} onAvatar={pickAvatar} onDelete={del} />}
         </View>
         <View style={s.navWrap} pointerEvents="box-none">
           <View style={s.pill}>
@@ -913,6 +1271,19 @@ export default function App() {
             <Ionicons name={on ? 'stop' : 'play'} size={26} color={on ? '#FF6B6B' : C.accent} />
           </TouchableOpacity>
         </View>
+        <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
+          <View style={s.dBg}>
+            <View style={s.dPanel}>
+              <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
+              {[['clubs', 'people', 'Kulüpler'], ['mod', 'color-wand', 'Modifiye (AI)']].map(([k, ic, l]) => (
+                <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
+              ))}
+            </View>
+            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenu(false)} />
+          </View>
+        </Modal>
+        {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
+        {screen === 'mod' && <ModStudio me={profile} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
@@ -929,7 +1300,7 @@ export default function App() {
   );
 }
 
-const s = StyleSheet.create({
+const mk = () => StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   brand: { color: C.text, fontSize: 20, fontWeight: '800', letterSpacing: 0.5, paddingHorizontal: 20, paddingTop: 8 },
   brand2: { color: C.accent, fontSize: 16, fontWeight: '800', marginBottom: 6 },
@@ -981,13 +1352,13 @@ const s = StyleSheet.create({
   navWrap: { position: 'absolute', left: 16, right: 16, bottom: 24, flexDirection: 'row', alignItems: 'center', gap: 10 },
   pill: { flex: 1, flexDirection: 'row', backgroundColor: C.card, borderRadius: 40, padding: 6, justifyContent: 'space-between' },
   navItem: { flex: 1, height: 52, borderRadius: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
-  navActive: { backgroundColor: '#2E4545', flex: 2.4 },
+  navActive: { backgroundColor: C.sel, flex: 2.4 },
   navText: { color: C.text, fontSize: 15, fontWeight: '600' },
   fab: { width: 58, height: 58, borderRadius: 29, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
   seg: { position: 'absolute', top: 12, alignSelf: 'center', flexDirection: 'row', backgroundColor: C.card, borderRadius: 24, padding: 4 },
-  segBtn: { paddingVertical: 8, paddingHorizontal: 13, borderRadius: 20 },
-  segActive: { backgroundColor: '#2E4545' },
-  segText: { color: C.dim, fontWeight: '600' },
+  segBtn: { paddingVertical: 8, paddingHorizontal: 9, borderRadius: 20 },
+  segActive: { backgroundColor: C.sel },
+  segText: { color: C.dim, fontWeight: '600', fontSize: 12 },
   terr: { position: 'absolute', top: 64, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#1C1C21EE', borderRadius: 32, paddingVertical: 8, paddingHorizontal: 14 },
   tav: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#5A2D25', alignItems: 'center', justifyContent: 'center' },
   tavT: { color: C.text, fontWeight: '800' },
@@ -1003,4 +1374,14 @@ const s = StyleSheet.create({
   shBrand: { color: '#fff', fontSize: 22, fontWeight: '800', fontStyle: 'italic' },
   dot: { width: 44, height: 44, borderRadius: 22, borderWidth: 2 },
   satBtn: { position: 'absolute', right: 16, bottom: 176, width: 48, height: 48, borderRadius: 24, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
+  hdr: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingTop: 4 },
+  hdrT: { color: C.text, fontSize: 18, fontWeight: '800', fontStyle: 'italic', marginLeft: 6 },
+  dBg: { flex: 1, flexDirection: 'row', backgroundColor: '#0009' },
+  dPanel: { width: 280, backgroundColor: C.bg, padding: 20, paddingTop: 56 },
+  dItem: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 16 },
+  rbar: { height: 6, borderRadius: 3, backgroundColor: C.line, marginTop: 10, overflow: 'hidden' },
+  rfill: { height: 6, backgroundColor: C.accent },
+  sthumb: { width: 110, height: 140, borderRadius: 16, marginRight: 10, backgroundColor: C.line },
+  storyBtn: { position: 'absolute', left: 16, bottom: 176, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.accent, borderRadius: 26, paddingVertical: 12, paddingHorizontal: 16 },
 });
+s = mk();
