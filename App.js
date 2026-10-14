@@ -28,38 +28,40 @@ const fmtTime = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = 
 const fmtDate = (t) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 // ---- Sürüş motoru: arka plan görevi ve ekran aynı veriyi kullanır ----
-const fresh = () => ({ t0: Date.now(), last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0 });
+const fresh = () => ({ t0: Date.now(), last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0 });
 let R = fresh();
 let onTick = null;
 
 function processLoc(loc) {
   const c = loc.coords, t = loc.timestamp, d = R;
   if (c.accuracy > 30) return;
-  const v = Math.max(0, c.speed ?? 0);
-  if (d.last) {
-    const dt = (t - d.last.t) / 1000;
-    if (dt > 0 && dt < 10) {
-      if (v > 0.8) d.dist += hav(d.last.c, c);
-      if (v > 1) d.movingMs += dt * 1000;
-      const a = (v - d.last.v) / dt;
-      let lat = 0, sd = 0;
-      if (c.heading >= 0 && d.last.c.heading >= 0 && v > 3) { sd = ((c.heading - d.last.c.heading + 540) % 360) - 180; lat = v * (Math.abs(sd) * Math.PI / 180) / dt; }
-      d.maxAcc = Math.max(d.maxAcc, Math.min(a, 12)); d.maxDec = Math.max(d.maxDec, Math.min(-a, 12));
-      if (lat > 1.5 && t - d.lastTurn > 4000) { if (sd > 0) d.right++; else d.left++; d.lastTurn = t; }
-      if (t - d.lastEv > 3000) {
-        if (a > 2.5) { d.acc++; d.lastEv = t; }
-        else if (a < -3) { d.brake++; d.lastEv = t; }
-        else if (lat > 3) { d.corner++; d.lastEv = t; }
-      }
-      d.maxG = Math.max(d.maxG, Math.min(Math.sqrt(a * a + lat * lat) / G, 2.5));
+  const dt = d.last ? (t - d.last.t) / 1000 : 0;
+  // Hız: GPS'in Doppler hızı; yoksa koordinat farkından (makul sınırda)
+  const v = c.speed != null && c.speed >= 0 ? c.speed : dt > 0 ? Math.min((hav(d.last.c, c) * 1000) / dt, 80) : 0;
+  if (d.last && dt >= 0.5 && dt < 10) {
+    // Mesafe hızdan hesaplanır: duran araçta GPS sapması mesafe sayılmaz
+    if (v > 1) { d.dist += (((v + d.last.v) / 2) * dt) / 1000; d.movingMs += dt * 1000; }
+    const a = Math.max(-12, Math.min(12, (v - d.last.v) / dt));
+    let lat = 0, sd = 0;
+    if (c.heading >= 0 && d.last.c.heading >= 0 && v > 2.5) { sd = ((c.heading - d.last.c.heading + 540) % 360) - 180; lat = v * (Math.abs(sd) * Math.PI / 180) / dt; }
+    d.latS = d.latS * 0.6 + lat * 0.4; d.aS = d.aS * 0.5 + a * 0.5;
+    d.maxAcc = Math.max(d.maxAcc, Math.min(a, 8)); d.maxDec = Math.max(d.maxDec, Math.min(-a, 8));
+    // Dönüş: yön değişimi hızlı birikirse (yaklaşık 55°+) bir dönüş sayılır; yumuşak virajlar ve GPS titremesi sayılmaz
+    d.turn = d.turn * 0.85 + sd;
+    if (Math.abs(d.turn) >= 55 && t - d.lastTurn > 3000) { if (d.turn > 0) d.right++; else d.left++; d.turn = 0; d.lastTurn = t; }
+    if (t - d.lastEv > 3000) {
+      if (a > 2.5) { d.acc++; d.lastEv = t; }
+      else if (a < -3) { d.brake++; d.lastEv = t; }
+      else if (d.latS > 3) { d.corner++; d.lastEv = t; }
     }
+    d.maxG = Math.max(d.maxG, Math.min(Math.sqrt(d.aS * d.aS + d.latS * d.latS) / G, 2.5));
   }
-  if (v >= 2) { d.moved = true; d.stopped = false; }
-  if (v < 1 && d.moved && !d.stopped) { d.stops++; d.stopped = true; }
-  d.max = Math.max(d.max, v * 3.6);
+  if (v >= 2) { d.moved = true; d.stopped = false; d.stillSince = 0; }
+  else if (v < 1) { if (!d.stillSince) d.stillSince = t; if (d.moved && !d.stopped && t - d.stillSince >= 4000) { d.stops++; d.stopped = true; } }
+  if (v * 3.6 < 400 && v > 1) d.max = Math.max(d.max, v * 3.6);
   const p = { latitude: c.latitude, longitude: c.longitude, v: Math.round(v * 3.6) };
   const lp = d.route[d.route.length - 1];
-  if ((!lp || hav(lp, p) > 0.01) && d.route.length < 4000) d.route.push(p);
+  if ((!lp || (v > 1 && hav(lp, p) > 0.01)) && d.route.length < 4000) d.route.push(p);
   d.last = { c, t, v };
   onTick && onTick();
 }
@@ -109,7 +111,7 @@ function TripStats({ t }) {
       <Card icon="navigate" color={C.accent} label="Mesafe" value={t.dist.toFixed(1)} unit="km" />
       <Card icon="time" color={C.warn} label="Süre" value={fmtTime(t.duration)} />
       <Card icon="flash" color="#FF453A" label="Maks. hız" value={Math.round(t.max)} unit="km/s" />
-      <Card icon="speedometer" color="#34C759" label="Ort. hız" value={Math.round(t.avg)} unit="km/s" />
+      <Card icon="speedometer" color="#34C759" label="Ort. hız" value={Math.round(Math.min(t.avg, t.max))} unit="km/s" />
       <Card icon="arrow-undo" color="#5B5BE0" label="Sol dönüş" value={t.left || 0} />
       <Card icon="arrow-redo" color="#FF2D55" label="Sağ dönüş" value={t.right || 0} />
       <Card icon="alert-circle" color="#E5575A" label="Fren" value={t.brake} />
@@ -216,7 +218,7 @@ function Welcome({ existing, onDone }) {
 const EMPTY = [];
 const hexKey = (lat, lon) => {
   const x = 6378137 * lon * Math.PI / 180, y = 6378137 * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
-  const q = (Math.sqrt(3) / 3 * x - y / 3) / 300, r = (2 / 3 * y) / 300;
+  const q = (Math.sqrt(3) / 3 * x - y / 3) / 500, r = (2 / 3 * y) / 500;
   let rx = Math.round(q), ry = Math.round(-q - r), rz = Math.round(r);
   const dx = Math.abs(rx - q), dy = Math.abs(ry + q + r), dz = Math.abs(rz - r);
   if (dx > dy && dx > dz) rx = -ry - rz; else if (dy <= dz) rz = -rx - ry;
@@ -408,21 +410,27 @@ var map=L.map('m',{zoomControl:false,dragging:${interactive},touchZoom:${interac
 var E='https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/';
 L.tileLayer(E+'World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:19,attribution:'Esri'}).addTo(map);
 L.tileLayer(E+'World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:19}).addTo(map);
-var grp=L.layerGroup().addTo(map),cg=L.layerGroup().addTo(map),pts=[],me=null,S=300,R=6378137;
+var grp=L.layerGroup().addTo(map),cg=L.layerGroup().addTo(map),gg=L.layerGroup().addTo(map),pts=[],me=null,S=500,R=6378137,ks=[],gridOn=false;
 function col(v){return v==null?'#6EC7C7':v<50?'#4FD1C5':v<90?'#34C759':v<120?'#FF9500':'#FF453A';}
 function inv(x,y){return [(2*Math.atan(Math.exp(y/R))-Math.PI/2)*180/Math.PI,x/R*180/Math.PI];}
 map.on('dragend',function(){var c=map.getCenter();window.ReactNativeWebView.postMessage(JSON.stringify({lat:c.lat,lng:c.lng}));});
 window.setRoute=function(p){grp.clearLayers();pts=p;if(p.length<2)return;var cur=[[p[0][0],p[0][1]]],c=col(p[1][2]);
 for(var i=1;i<p.length;i++){var k=col(p[i][2]);if(k!==c){L.polyline(cur,{color:c,weight:5}).addTo(grp);cur=[cur[cur.length-1]];c=k;}cur.push([p[i][0],p[i][1]]);}
 L.polyline(cur,{color:c,weight:5}).addTo(grp);};
-window.setCells=function(ks){cg.clearLayers();ks.forEach(function(k){var a=k.split(':'),q=+a[0],r=+a[1],cx=S*Math.sqrt(3)*(q+r/2),cy=S*1.5*r,c=[];
-for(var i=0;i<6;i++){var t=(60*i-30)*Math.PI/180;c.push(inv(cx+S*Math.cos(t),cy+S*Math.sin(t)));}
-L.polygon(c,{color:'#7DD3D8',weight:1.5,fillColor:'#2F8F93',fillOpacity:.45}).addTo(cg);});};
+function px(la,lo){return [R*lo*Math.PI/180,R*Math.log(Math.tan(Math.PI/4+la*Math.PI/360))];}
+function hexPoly(q,r){var cx=S*Math.sqrt(3)*(q+r/2),cy=S*1.5*r,c=[];for(var i=0;i<6;i++){var t=(60*i-30)*Math.PI/180;c.push(inv(cx+S*Math.cos(t),cy+S*Math.sin(t)));}return c;}
+function draw(){cg.clearLayers();gg.clearLayers();var set={};
+ks.forEach(function(k){set[k]=1;var a=k.split(':');L.polygon(hexPoly(+a[0],+a[1]),{color:'#7DD3D8',weight:1.5,fillColor:'#2F8F93',fillOpacity:.5}).addTo(cg);});
+if(gridOn&&map.getZoom()>=12){var b=map.getBounds(),p1=px(b.getSouth(),b.getWest()),p2=px(b.getNorth(),b.getEast()),r0=Math.floor(p1[1]/(S*1.5))-1,r1=Math.ceil(p2[1]/(S*1.5))+1;
+for(var r=r0;r<=r1;r++){var q0=Math.floor(p1[0]/(S*Math.sqrt(3))-r/2)-1,q1=Math.ceil(p2[0]/(S*Math.sqrt(3))-r/2)+1;
+for(var q=q0;q<=q1;q++){if(!set[q+':'+r])L.polygon(hexPoly(q,r),{color:'#7DD3D8',weight:1,opacity:.35,fill:false,interactive:false}).addTo(gg);}}}}
+map.on('moveend',function(){if(gridOn)draw();});
+window.setCells=function(a,g){ks=a;gridOn=!!g;draw();};
 window.fit=function(){if(pts.length>1)map.fitBounds(L.latLngBounds(pts.map(function(q){return [q[0],q[1]];})),{padding:[30,30],animate:false});};
 window.setMe=function(la,lo,go){var ll=[la,lo];if(!me)me=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#6EC7C7',fillOpacity:1}).addTo(map);else me.setLatLng(ll);if(go)map.setView(ll,Math.max(map.getZoom(),15),{animate:true});};
 </script></body></html>`;
 
-function LeafletMap({ route, cells, me, follow, fit, interactive = true, onMove, style }) {
+function LeafletMap({ route, cells, grid, me, follow, fit, interactive = true, onMove, style }) {
   const ref = useRef(null);
   const [ready, setReady] = useState(false);
   const html = useRef(leafletHtml(interactive)).current;
@@ -432,7 +440,7 @@ function LeafletMap({ route, cells, me, follow, fit, interactive = true, onMove,
     run(`setRoute(${JSON.stringify((route || []).map((p) => [p.latitude, p.longitude, p.v]))})`);
     if (fit) run('fit()');
   }, [ready, route]);
-  useEffect(() => { if (ready) run(`setCells(${JSON.stringify(cells || [])})`); }, [ready, cells]);
+  useEffect(() => { if (ready) run(`setCells(${JSON.stringify(cells || [])},${!!grid})`); }, [ready, cells, grid]);
   useEffect(() => { if (ready && me) run(`setMe(${me.latitude},${me.longitude},${!!follow})`); }, [ready, me, follow]);
   return (
     <WebView
@@ -475,7 +483,7 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
 function MapTab({ route, cells, on, region, regions, name, pickPhoto, delPhoto, onPan }) {
   const [me, setMe] = useState(null);
   const [seen, setSeen] = useState(false);
-  const [mode, setMode] = useState('route');
+  const [mode, setMode] = useState('cells');
   useEffect(() => {
     let sub;
     Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 10 }, (l) => setMe({ latitude: l.coords.latitude, longitude: l.coords.longitude }))
@@ -485,7 +493,7 @@ function MapTab({ route, cells, on, region, regions, name, pickPhoto, delPhoto, 
   useEffect(() => { if (me && !seen) { setSeen(true); onPan(me.latitude, me.longitude); } }, [me]);
   return (
     <View style={s.map}>
-      <LeafletMap style={s.map} route={mode === 'route' ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} onMove={onPan} />
+      <LeafletMap style={s.map} route={mode === 'route' ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} />
       {mode === 'photos' && <PhotosView regions={regions} cur={region} pickPhoto={pickPhoto} delPhoto={delPhoto} />}
       <View style={s.seg}>
         {[['route', 'Rota'], ['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım']].map(([k, l]) => (
@@ -505,9 +513,9 @@ function MapTab({ route, cells, on, region, regions, name, pickPhoto, delPhoto, 
       )}
       {mode === 'cells' && (
         <View style={s.terr}>
-          <Text style={s.itemSub}>{name.toUpperCase()}</Text>
-          <Text style={s.cValue}>{(cells.length * 0.234).toFixed(1)} <Text style={s.cUnit}>km² · {cells.length} bölge</Text></Text>
-          <Text style={s.itemSub}>Sürdüğün her yol haritada bölge kazandırır.</Text>
+          <View style={s.tav}><Text style={s.tavT}>{name.slice(0, 2).toUpperCase()}</Text></View>
+          <Text style={s.tname}>{name.toUpperCase()}</Text>
+          <Text style={s.tkm}>{(cells.length * 2.598 * Math.pow(0.5 * Math.cos(((me?.latitude ?? 40) * Math.PI) / 180), 2)).toFixed(1)} km²</Text>
         </View>
       )}
     </View>
@@ -553,7 +561,7 @@ function ShareSheet({ t, onClose }) {
                 {L('Mesafe', `${t.dist < 10 ? t.dist.toFixed(1) : Math.round(t.dist)} km`)}
                 {layout < 2 && L('Süre', fmtDur(t.duration))}
                 {layout === 1 && L('Maks. hız', `${Math.round(t.max)} km/s`)}
-                {layout === 1 && L('Ort. hız', `${Math.round(t.avg)} km/s`)}
+                {layout === 1 && L('Ort. hız', `${Math.round(Math.min(t.avg, t.max))} km/s`)}
               </View>
               <RouteSvg route={t.route} w={W - 60} h={W * (layout === 1 ? 0.3 : 0.42)} />
               <Text style={s.shBrand}>ApexDrive</Text>
@@ -635,8 +643,8 @@ export default function App() {
       const key = [a.isoCountryCode, a.region, name].join('|');
       const known = regionsRef.current[key];
       setCur({ key, name, photo: known?.photo });
-      if (!known) {
-        saveRegions({ ...regionsRef.current, [key]: { name, asked: true } });
+      if (!known?.seen) {
+        saveRegions({ ...regionsRef.current, [key]: { ...known, name, seen: true } });
         if (onRef.current) pending.current = { key, name }; else setAsk({ key, name });
       }
     } catch {}
@@ -690,7 +698,7 @@ export default function App() {
     const d = R, duration = (Date.now() - d.t0) / 1000;
     if (d.dist < 0.05) return Alert.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
-    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? d.dist / mov : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route };
+    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route };
     const n = [t, ...trips];
     setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     setTab('profile');
@@ -781,7 +789,7 @@ const s = StyleSheet.create({
   tab: { flex: 1, alignItems: 'center', paddingVertical: 14 },
   tabText: { color: C.dim, fontSize: 15 },
   map: { flex: 1 },
-  chip: { position: 'absolute', top: 64, left: 12, right: 12, backgroundColor: C.card, borderRadius: 24, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  chip: { position: 'absolute', bottom: 100, left: 12, right: 12, backgroundColor: C.card, borderRadius: 24, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10 },
   thumb: { width: 44, height: 44, borderRadius: 10, backgroundColor: C.line },
   shot: { backgroundColor: '#12203A', borderRadius: 20, padding: 20, marginTop: 8 },
   shotBrand: { color: C.accent, fontWeight: '800', fontSize: 16 },
@@ -813,7 +821,11 @@ const s = StyleSheet.create({
   segBtn: { paddingVertical: 8, paddingHorizontal: 13, borderRadius: 20 },
   segActive: { backgroundColor: '#2E4545' },
   segText: { color: C.dim, fontWeight: '600' },
-  terr: { position: 'absolute', left: 16, right: 16, bottom: 100, backgroundColor: C.card, borderRadius: 24, padding: 16 },
+  terr: { position: 'absolute', top: 64, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#1C1C21EE', borderRadius: 32, paddingVertical: 8, paddingHorizontal: 14 },
+  tav: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#5A2D25', alignItems: 'center', justifyContent: 'center' },
+  tavT: { color: C.text, fontWeight: '800' },
+  tname: { color: C.text, fontSize: 18, fontWeight: '800', letterSpacing: 1 },
+  tkm: { color: C.text, fontSize: 16, fontWeight: '700' },
   pAv: { width: 54, height: 54, borderRadius: 27, backgroundColor: C.card, borderWidth: 2, borderColor: C.line, alignItems: 'center', justifyContent: 'center', marginVertical: 6 },
   pLetter: { color: C.accent, fontSize: 20, fontWeight: '800' },
   pBlock: { width: '92%', backgroundColor: C.card, borderTopLeftRadius: 14, borderTopRightRadius: 14, borderWidth: 1, borderBottomWidth: 0, alignItems: 'center', justifyContent: 'center', marginTop: 8 },

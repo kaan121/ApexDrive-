@@ -1,6 +1,6 @@
 {
   "name": "apexdrive",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": { "start": "expo start", "android": "expo start --android", "ios": "expo start --ios" },
   "dependencies": {
