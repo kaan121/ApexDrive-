@@ -22,7 +22,8 @@
       "package": "com.apexdrive.app",
       "adaptiveIcon": {
         "foregroundImage": "./adaptive-icon.png",
-        "backgroundColor": "#0B395F"
+        "monochromeImage": "./adaptive-monochrome.png",
+        "backgroundColor": "#0B2B4A"
       },
       "permissions": [
         "ACCESS_FINE_LOCATION",
@@ -43,7 +44,13 @@
         }
       ],
       "expo-image-picker",
-      "expo-notifications"
+      [
+        "expo-notifications",
+        {
+          "icon": "./notification-icon.png",
+          "color": "#2A9D9D"
+        }
+      ]
     ]
   }
 }
