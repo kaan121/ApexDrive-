@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import Svg, { Path, Circle } from 'react-native-svg';
+import Svg, { Path, Circle, Defs, LinearGradient, Stop, Rect, Polygon } from 'react-native-svg';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
 import * as IntentLauncher from 'expo-intent-launcher';
@@ -185,11 +185,11 @@ function Welcome({ existing, onDone }) {
   const [busy, setBusy] = useState(false);
   const map = vt === 'moto' ? MOTO_MAP : CAR_MAP;
   const next = () => {
-    if (!/^[a-z0-9_.]{3,20}$/.test(name.trim().toLowerCase())) return Alert.alert('Geçersiz kullanıcı adı', '3-20 karakter olmalı; harf, rakam, _ ve . kullanabilirsin.');
+    if (!/^[a-z0-9_.]{3,20}$/.test(name.trim().toLowerCase())) return AlertX.alert('Geçersiz kullanıcı adı', '3-20 karakter olmalı; harf, rakam, _ ve . kullanabilirsin.');
     setStep(1);
   };
   const go = async () => {
-    if (!car.brand || !car.model || !car.year) return Alert.alert('Eksik bilgi', 'Marka, model ve yılı seç.');
+    if (!car.brand || !car.model || !car.year) return AlertX.alert('Eksik bilgi', 'Marka, model ve yılı seç.');
     const c = { brand: car.brand, model: car.model, year: +car.year, vtype: vt };
     if (existing) return onDone({ ...existing, car: c });
     const u = name.trim().toLowerCase();
@@ -197,8 +197,8 @@ function Welcome({ existing, onDone }) {
     const deviceId = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const res = await register(u, deviceId, c);
     setBusy(false);
-    if (res === 'taken') { setStep(0); return Alert.alert('Bu kullanıcı adı alınmış', 'Başka bir tane dene.'); }
-    if (res === 'err') return Alert.alert('Bağlanılamadı', 'İnternet bağlantını kontrol edip tekrar dene.');
+    if (res === 'taken') { setStep(0); return AlertX.alert('Bu kullanıcı adı alınmış', 'Başka bir tane dene.'); }
+    if (res === 'err') return AlertX.alert('Bağlanılamadı', 'İnternet bağlantını kontrol edip tekrar dene.');
     onDone({ username: u, deviceId, car: c });
   };
   const Field = ({ label, value, onPress, off }) => (
@@ -516,8 +516,11 @@ function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me
 }
 
 function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
+  const [view, setView] = useState(null);
   const list = Object.entries(regions).map(([k, r]) => ({ k, name: r.name, photos: r.photos || (r.photo ? [r.photo] : []) }))
     .filter((r) => r.photos.length || r.k === cur?.key).sort((a, b) => (b.k === cur?.key) - (a.k === cur?.key));
+  const ask = (k, u) => AlertX.alert('Fotoğraf silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => delPhoto(k, u) }]);
+  const vp = view ? (list.find((x) => x.k === view.k) || { photos: [] }).photos : [];
   return (
     <ScrollView style={[StyleSheet.absoluteFill, { backgroundColor: C.bg }]} contentContainerStyle={{ padding: 20, paddingTop: 70, paddingBottom: 120 }}>
       {list.length === 0 && <Text style={s.hint}>Haritada gezindikçe bölgeler burada görünür.</Text>}
@@ -525,8 +528,8 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
         <View key={r.k} style={{ marginBottom: 22 }}>
           <Text style={s.sec}>{r.name}</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-            {r.photos.map((u) => (
-              <TouchableOpacity key={u} style={s.gph} onLongPress={() => Alert.alert('Fotoğraf silinsin mi?', '', [{ text: 'Vazgeç' }, { text: 'Sil', style: 'destructive', onPress: () => delPhoto(r.k, u) }])}>
+            {r.photos.map((u, i) => (
+              <TouchableOpacity key={u} style={s.gph} onPress={() => setView({ k: r.k, i })} onLongPress={() => ask(r.k, u)}>
                 <Image source={{ uri: u }} style={{ width: '100%', height: '100%', borderRadius: 16 }} />
               </TouchableOpacity>
             ))}
@@ -534,6 +537,7 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
           </View>
         </View>
       ))}
+      {view && <PhotoViewer photos={vp} start={view.i} onClose={() => setView(null)} onDelete={(u) => ask(view.k, u)} />}
     </ScrollView>
   );
 }
@@ -578,7 +582,7 @@ function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, d
         ))}
       </View>
       {mode === 'stories' && (online ? (
-        <TouchableOpacity style={s.storyBtn} onPress={() => (me ? setComposer(true) : Alert.alert('Konum bulunamadı', 'Konum izni verip biraz bekle.'))}>
+        <TouchableOpacity style={s.storyBtn} onPress={() => (me ? setComposer(true) : AlertX.alert('Konum bulunamadı', 'Konum izni verip biraz bekle.'))}>
           <Ionicons name="add-circle" size={22} color="#06101F" /><Text style={s.btnText}>Hikaye paylaş</Text>
         </TouchableOpacity>
       ) : <View style={s.terr}><Text style={s.itemSub}>Hikayeler için sunucu bağlantısı gerekli.</Text></View>)}
@@ -649,10 +653,23 @@ function ShareSheet({ t, onClose }) {
   const W = Dimensions.get('window').width - 40;
   const [bg, setBg] = useState(0), [photo, setPhoto] = useState(null), [layout, setLayout] = useState(0), [rs, setRs] = useState(0), [fi, setFi] = useState(0), [tc, setTc] = useState(TCOLORS[0]), [dim, setDim] = useState(1);
   const shot = useRef(null);
+  const [tpl, setTpl] = useState(0), [scene, setScene] = useState(0), [gc, setGc] = useState(GCOL[0]), [names, setNames] = useState([]), [persp, setPersp] = useState(true);
+  useEffect(() => {
+    if (!t.route || t.route.length < 2) return;
+    let live = true;
+    (async () => {
+      const out = [];
+      for (const f of [0, 0.3, 0.55, 0.8, 1]) {
+        try { const p = t.route[Math.round(f * (t.route.length - 1))]; const [a] = await Location.reverseGeocodeAsync({ latitude: p.latitude, longitude: p.longitude }); out.push(a ? a.city || a.subregion || a.district || a.region || '' : ''); } catch { out.push(''); }
+      }
+      if (live) setNames(out.map((n, i) => (n && n !== out[i - 1] ? n : '')));
+    })();
+    return () => { live = false; };
+  }, []);
   const pickBg = async () => { try { const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 }); if (!r.canceled) setPhoto(r.assets[0].uri); } catch {} };
   const share = async () => {
     try { const uri = await captureRef(shot, { format: 'png', quality: 1 }); await Sharing.shareAsync(uri, { mimeType: 'image/png' }); }
-    catch { Alert.alert('Paylaşılamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
+    catch { AlertX.alert('Paylaşılamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
   };
   const F = FONTS[fi][1];
   const L = (k, v) => <View style={{ alignItems: 'center', marginBottom: 8 }}><Text style={[s.shL, F, { color: tc + 'CC', fontWeight: '400' }]}>{k}</Text><Text style={[s.shV, F, { color: tc }]}>{v}</Text></View>;
@@ -661,7 +678,8 @@ function ShareSheet({ t, onClose }) {
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
-          <View ref={shot} collapsable={false} style={{ width: W, height: W, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg] }}>
+          <View ref={shot} collapsable={false} style={{ width: W, height: tpl === 2 ? W : W * 1.25, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg] }}>
+            {tpl < 2 ? <RoadCard t={t} W={W} tpl={tpl} photo={photo} scene={scene} gc={gc} dim={dim} names={names} persp={persp} /> : (<>
             {photo && <Image source={{ uri: photo }} style={StyleSheet.absoluteFill} resizeMode="cover" />}
             <View style={[StyleSheet.absoluteFill, { backgroundColor: photo ? `rgba(0,0,0,${[0, 0.35, 0.6][dim]})` : 'transparent', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 26 }]}>
               <View style={{ alignItems: 'center' }}>
@@ -673,7 +691,27 @@ function ShareSheet({ t, onClose }) {
               <RouteSvg route={t.route} w={W - 60} h={W * (layout === 1 ? 0.3 : 0.42)} rs={rs} color={tc} />
               <Text style={[s.shBrand, F, { color: tc }]}>ApexDrive</Text>
             </View>
+          </>)}
           </View>
+          <Sec>Şablon</Sec>
+          <View style={{ alignSelf: 'flex-start' }}><Chips opts={[['Yol 1', 0], ['Yol 2', 1], ['Klasik', 2]]} val={tpl} onPick={setTpl} /></View>
+          {tpl < 2 && (
+            <>
+              <Sec>Arka plan</Sec>
+              <View style={{ flexDirection: 'row', gap: 12, alignSelf: 'flex-start', marginTop: 8 }}>
+                {['#C2692B', '#27507A'].map((c, i) => <TouchableOpacity key={c} onPress={() => { setScene(i); setPhoto(null); }} style={[s.dot, { backgroundColor: c, borderColor: !photo && scene === i ? C.accent : C.line }]} />)}
+                <TouchableOpacity onPress={pickBg} style={[s.dot, { backgroundColor: C.card, borderColor: photo ? C.accent : C.line, alignItems: 'center', justifyContent: 'center' }]}><Ionicons name="image" size={20} color={C.text} /></TouchableOpacity>
+              </View>
+              <View style={{ alignSelf: 'flex-start' }}><Chips opts={[['Karartma yok', 0], ['Hafif', 1], ['Koyu', 2]]} val={dim} onPick={setDim} /></View>
+              <Sec>Işık rengi</Sec>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, alignSelf: 'flex-start', marginTop: 8 }}>
+                {GCOL.map((c) => <TouchableOpacity key={c} onPress={() => setGc(c)} style={[s.dot, { width: 36, height: 36, borderRadius: 18, backgroundColor: c, borderColor: gc === c ? C.accent : C.line }]} />)}
+              </View>
+              <Sec>Yol efekti</Sec>
+              <View style={{ alignSelf: 'flex-start' }}><Chips opts={[['Perspektif açık', true], ['Düz', false]]} val={persp} onPick={setPersp} /></View>
+            </>
+          )}
+          {tpl === 2 && (<>
           <Sec>Arka plan</Sec>
           <View style={{ flexDirection: 'row', gap: 12, alignSelf: 'flex-start', marginTop: 8 }}>
             {THEMES.map((c, i) => <TouchableOpacity key={c} onPress={() => { setBg(i); setPhoto(null); }} style={[s.dot, { backgroundColor: c, borderColor: !photo && bg === i ? C.accent : C.line }]} />)}
@@ -690,6 +728,7 @@ function ShareSheet({ t, onClose }) {
           </View>
           <Sec>Düzen</Sec>
           <View style={{ alignSelf: 'flex-start' }}><Chips opts={[['Klasik', 0], ['Detaylı', 1], ['Minimal', 2]]} val={layout} onPick={setLayout} /></View>
+          </>)}
           <TouchableOpacity style={[s.btn, { marginTop: 24 }]} onPress={share}><Text style={s.btnText}>Paylaş</Text></TouchableOpacity>
           <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, padding: 16 }}>Kapat</Text></TouchableOpacity>
         </ScrollView>
@@ -723,16 +762,19 @@ async function scheduleReminders(docs, rem) {
 const fmtD = (v) => { const x = v.replace(/\D/g, '').slice(0, 8); return x.length > 4 ? `${x.slice(0, 2)}.${x.slice(2, 4)}.${x.slice(4)}` : x.length > 2 ? `${x.slice(0, 2)}.${x.slice(2)}` : x; };
 
 function VehicleTab({ me, docs, setDocs, rem, setRem }) {
+  const setStart = (k, v) => { const d = parseDate(v), y = docs['yr_' + k] || DEFY[k]; setDocs({ ...docs, ['st_' + k]: v, [k]: d ? fmtOut(addYears(d, y)) : '' }); };
+  const setYears = (k, y) => { const d = parseDate(docs['st_' + k]); setDocs({ ...docs, ['yr_' + k]: y, ...(d ? { [k]: fmtOut(addYears(d, y)) } : {}) }); };
   const test = async () => {
     const p = await Notifications.requestPermissionsAsync();
-    if (!p.granted) return Alert.alert('Bildirim izni kapalı', 'Telefon ayarlarından ApexDrive bildirimlerine izin ver.');
+    if (!p.granted) return AlertX.alert('Bildirim izni kapalı', 'Telefon ayarlarından ApexDrive bildirimlerine izin ver.');
     await Notifications.scheduleNotificationAsync({ content: { title: 'ApexDrive', body: 'Hatırlatıcılar çalışıyor 👍' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 5 } });
-    Alert.alert('Gönderildi', '5 saniye içinde bildirim gelecek.');
+    AlertX.alert('Gönderildi', '5 saniye içinde bildirim gelecek.');
   };
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }} keyboardShouldPersistTaps="handled">
       <Text style={s.title}>Araç</Text>
       {me.car && <Text style={[s.itemSub, { marginBottom: 14 }]}>{me.car.brand} {me.car.model} · {me.car.year}</Text>}
+      <Text style={[s.itemSub, { marginBottom: 12 }]}>Başlangıç tarihini ve süreyi gir, bitiş tarihi kendiliğinden hesaplanır.</Text>
       {DOCS.map(([k, label, icon]) => {
         const d = parseDate(docs[k]), left = d ? daysLeft(d) : null;
         const col = left == null ? C.dim : left <= 7 ? '#FF453A' : left <= 30 ? C.warn : '#34C759';
@@ -743,7 +785,9 @@ function VehicleTab({ me, docs, setDocs, rem, setRem }) {
               <Text style={[s.itemTitle, { flex: 1 }]}>{label}</Text>
               {left != null && <Text style={{ color: col, fontWeight: '700' }}>{left < 0 ? `${-left} gün geçti` : left === 0 ? 'Bugün bitiyor' : `${left} gün kaldı`}</Text>}
             </View>
-            <TextInput style={[s.input, { marginTop: 12 }]} value={docs[k] || ''} onChangeText={(v) => setDocs({ ...docs, [k]: fmtD(v) })} placeholder="Bitiş tarihi (GG.AA.YYYY)" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={10} />
+            <TextInput style={[s.input, { marginTop: 12 }]} value={docs['st_' + k] || ''} onChangeText={(v) => setStart(k, fmtD(v))} placeholder="Başlangıç tarihi (GG.AA.YYYY)" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={10} />
+            <Chips opts={[['1 yıl', 1], ['2 yıl', 2], ['3 yıl', 3]]} val={docs['yr_' + k] || DEFY[k]} onPick={(y) => setYears(k, y)} />
+            {!!docs[k] && <Text style={[s.itemSub, { marginTop: 10 }]}>Bitiş: <Text style={{ color: C.text, fontWeight: '700' }}>{docs[k]}</Text></Text>}
           </View>
         );
       })}
@@ -834,14 +878,14 @@ function StoryComposer({ me, pos, onClose }) {
     })();
   }, []);
   const post = async () => {
-    if (img.length > 900000) return Alert.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
+    if (img.length > 900000) return AlertX.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
     setBusy(true);
     try {
       await api('stories?created_at=lt.' + new Date(Date.now() - 864e5).toISOString(), { method: 'DELETE' });
       const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: cap.trim(), img }) });
       if (!r.ok) throw 0;
       onClose();
-    } catch { Alert.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
+    } catch { AlertX.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
     setBusy(false);
   };
   if (!img) return null;
@@ -926,14 +970,14 @@ function ClubsScreen({ me, onClose }) {
   useEffect(() => { load(); }, []);
   const create = async () => {
     const n = nm.trim();
-    if (n.length < 3) return Alert.alert('Kulüp adı en az 3 karakter olmalı');
+    if (n.length < 3) return AlertX.alert('Kulüp adı en az 3 karakter olmalı');
     try {
       const r = await api('clubs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: n, about: ab.trim(), vtype: me.car?.vtype || 'car', owner: me.username }) });
-      if (r.status === 409) return Alert.alert('Bu kulüp adı alınmış');
+      if (r.status === 409) return AlertX.alert('Bu kulüp adı alınmış');
       const [c] = await r.json();
       await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username }) });
       setMk(false); setNm(''); setAb(''); load(); setSel(c);
-    } catch { Alert.alert('Kulüp oluşturulamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
+    } catch { AlertX.alert('Kulüp oluşturulamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
   };
   const list = clubs.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
   return (
@@ -985,7 +1029,7 @@ function ModStudio({ me, onClose }) {
     setErr(false); setBusy(true);
     setUrl(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&nologo=true&model=flux&seed=${Math.floor(Math.random() * 1e6)}`);
   };
-  const share = async () => { try { const f = await FileSystem.downloadAsync(url, FileSystem.cacheDirectory + 'apex-mod.jpg'); await Sharing.shareAsync(f.uri); } catch { Alert.alert('Paylaşılamadı', 'Görsel indirilemedi.'); } };
+  const share = async () => { try { const f = await FileSystem.downloadAsync(url, FileSystem.cacheDirectory + 'apex-mod.jpg'); await Sharing.shareAsync(f.uri); } catch { AlertX.alert('Paylaşılamadı', 'Görsel indirilemedi.'); } };
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
@@ -1038,7 +1082,7 @@ function SettingsModal({ prefs, setPrefs, onClose }) {
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20 }}>
-          <Text style={s.title}>Ayarlar</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Ayarlar</Text><TouchableOpacity onPress={onClose} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
           <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
           <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
           <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
@@ -1047,12 +1091,164 @@ function SettingsModal({ prefs, setPrefs, onClose }) {
             <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
             {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
           </Box>
-          <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, textAlign: 'center', padding: 18 }}>Kapat</Text></TouchableOpacity>
-        </ScrollView>
+                  </ScrollView>
       </SafeAreaView>
     </Modal>
   );
 }
+
+// ---- Kendi uyarı penceremiz (telefonun varsayılan uyarısı yerine) ----
+const Dlg = { show: null };
+const ME = { car: '' };
+const AlertX = { alert: (title, msg, buttons) => { if (Dlg.show) Dlg.show({ title, msg, buttons }); } };
+function DialogHost({ dlg, onClose }) {
+  const last = useRef(null);
+  if (dlg) last.current = dlg;
+  const d = dlg || last.current || {}, btns = d.buttons && d.buttons.length ? d.buttons : [{ text: 'Tamam' }];
+  const kind = (b, i) => (b.style === 'destructive' ? 'd' : b.style === 'cancel' || (!b.style && i < btns.length - 1) ? 'c' : 'p');
+  const BG = { d: '#FF453A22', c: C.line, p: C.accent }, FG = { d: '#FF6B6B', c: C.text, p: '#06101F' };
+  return (
+    <Modal visible={!!dlg} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={s.dlgBg}>
+        <View style={s.dlg}>
+          <Text style={s.dlgT}>{d.title}</Text>
+          {!!d.msg && <Text style={s.dlgM}>{d.msg}</Text>}
+          <View style={{ flexDirection: btns.length > 2 ? 'column' : 'row', gap: 10, marginTop: 20 }}>
+            {btns.map((b, i) => {
+              const k = kind(b, i);
+              return (
+                <TouchableOpacity key={i} style={[s.dlgB, { backgroundColor: BG[k] }]} onPress={() => { onClose(); b.onPress && b.onPress(); }}>
+                  <Text style={[s.dlgBT, { color: FG[k] }]}>{b.text}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ---- Fotoğraf görüntüleyici ----
+function PhotoViewer({ photos, start, onClose, onDelete }) {
+  const { width: W, height: H } = Dimensions.get('window');
+  const [i, setI] = useState(start);
+  useEffect(() => { if (photos.length === 0) onClose(); }, [photos.length]);
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <FlatList data={photos} horizontal pagingEnabled showsHorizontalScrollIndicator={false} initialScrollIndex={Math.min(start, Math.max(0, photos.length - 1))} keyExtractor={(u) => u}
+          getItemLayout={(_, k) => ({ length: W, offset: W * k, index: k })}
+          onMomentumScrollEnd={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / W))}
+          renderItem={({ item }) => <View style={{ width: W, height: H, justifyContent: 'center' }}><Image source={{ uri: item }} style={{ width: W, height: H * 0.8 }} resizeMode="contain" /></View>} />
+        <View style={s.pvTop}>
+          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>{Math.min(i, photos.length - 1) + 1} / {photos.length}</Text>
+          <View style={{ flexDirection: 'row', gap: 22 }}>
+            <TouchableOpacity onPress={() => photos[i] && onDelete(photos[i])}><Ionicons name="trash-outline" size={26} color="#fff" /></TouchableOpacity>
+            <TouchableOpacity onPress={onClose}><Ionicons name="close" size={30} color="#fff" /></TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ---- Yol projeksiyonu paylaşım şablonları ----
+const GCOL = ['#FFB02E', '#6EC7C7', '#FF453A', '#BF5AF2', '#34C759', '#FFFFFF'];
+const spBar = (route, n = 36) => Array.from({ length: n }, (_, j) => spColor(route[Math.min(route.length - 1, Math.floor((j / n) * route.length))]?.v));
+function flatRoute(route, w, h) {
+  const k = Math.cos(route[0].latitude * Math.PI / 180), step = Math.ceil(route.length / 200);
+  const pts = route.filter((_, i) => i % step === 0 || i === route.length - 1);
+  const xs = pts.map((p) => p.longitude * k), ys = pts.map((p) => -p.latitude), n = pts.length - 1;
+  // rota, başlangıç altta bitiş yukarıda olacak şekilde döndürülür
+  const a = Math.atan2(xs[n] - xs[0], -(ys[n] - ys[0])), ca = Math.cos(a), sa = Math.sin(a);
+  const R = pts.map((_, i) => [xs[i] * ca + ys[i] * sa, -xs[i] * sa + ys[i] * ca]);
+  const x0 = Math.min(...R.map((p) => p[0])), y0 = Math.min(...R.map((p) => p[1]));
+  const dx = Math.max(...R.map((p) => p[0])) - x0 || 1e-9, dy = Math.max(...R.map((p) => p[1])) - y0 || 1e-9;
+  const sc = Math.min((w - 30) / dx, (h - 30) / dy), ox = (w - dx * sc) / 2, oy = (h - dy * sc) / 2;
+  return R.map((p) => [ox + (p[0] - x0) * sc, oy + (p[1] - y0) * sc]);
+}
+function SceneBg({ w, h, v }) {
+  const c = [['#FF9A3C', '#5B2A6E'], ['#27507A', '#0B1020']][v] || ['#FF9A3C', '#5B2A6E'];
+  return (
+    <Svg width={w} height={h} style={StyleSheet.absoluteFill}>
+      <Defs><LinearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><Stop offset="0" stopColor={c[1]} /><Stop offset="0.4" stopColor={c[0]} /><Stop offset="0.41" stopColor="#17171C" /><Stop offset="1" stopColor="#09090C" /></LinearGradient></Defs>
+      <Rect width={w} height={h} fill="url(#sky)" />
+      <Path d={`M0 ${h * 0.41} L${w * 0.18} ${h * 0.31} L${w * 0.4} ${h * 0.39} L${w * 0.62} ${h * 0.28} L${w * 0.84} ${h * 0.38} L${w} ${h * 0.33} L${w} ${h * 0.41} Z`} fill="#0E0E16" />
+    </Svg>
+  );
+}
+function RoadCard({ t, W, tpl, photo, scene, gc, dim, names, persp }) {
+  const H = W * 1.25, GW = W * 0.92, GH = W * 1.1, RW = GW * 0.86, RH = GH * 0.4;
+  const end = new Date(t.start + t.duration * 1000);
+  const hm = end.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+  const arrive = `${hm}, ${end.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+  const km = t.dist < 10 ? t.dist.toFixed(1) : Math.round(t.dist), sp = Math.round(t.max), avg = Math.round(Math.min(t.avg, t.max));
+  const P = t.route && t.route.length > 1 ? flatRoute(t.route, RW, RH) : null;
+  const d = P ? P.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ') : '';
+  const at = (f) => P[Math.round(f * (P.length - 1))];
+  const gold = { color: gc, fontStyle: 'italic' }, soft = { color: gc + 'DD', fontStyle: 'italic' };
+  const cm = { fill: 'none', strokeLinejoin: 'round', strokeLinecap: 'round' };
+  const p0 = P && P[0];
+  return (
+    <>
+      {photo ? <Image source={{ uri: photo }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <SceneBg w={W} h={H} v={scene} />}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: `rgba(0,0,0,${[0, 0.25, 0.5][dim]})` }]} />
+      <View style={{ position: 'absolute', left: (W - GW) / 2, bottom: 4, width: GW, height: GH, transform: persp ? [{ perspective: 800 }, { rotateX: '38deg' }] : [] }}>
+        {P && (
+          <View style={{ position: 'absolute', left: (GW - RW) / 2, top: 0, width: RW, height: RH }}>
+            <Svg width={RW} height={RH}>
+              <Path d={d} stroke={gc} strokeWidth={20} opacity={0.14} {...cm} />
+              <Path d={d} stroke={gc} strokeWidth={12} opacity={0.3} {...cm} />
+              <Path d={d} stroke={gc} strokeWidth={6} {...cm} />
+              <Path d={d} stroke="#FFF3D6" strokeWidth={2} {...cm} />
+              {tpl === 0
+                ? <Polygon points={`${p0[0]},${p0[1] - 16} ${p0[0] + 12},${p0[1] + 10} ${p0[0]},${p0[1] + 4} ${p0[0] - 12},${p0[1] + 10}`} fill="#0008" stroke="#fff" strokeWidth={2} />
+                : <Circle cx={p0[0]} cy={p0[1]} r={9} fill="#0008" stroke="#fff" strokeWidth={2} />}
+            </Svg>
+            {[0.3, 0.55, 0.8, 1].map((f, j) => (names[j + 1] ? <Text key={j} style={[s.rcLbl, soft, { left: at(f)[0] + 8, top: at(f)[1] - 8 }]}>{names[j + 1]}</Text> : null))}
+            {names[0] ? <Text style={[s.rcLbl, soft, { left: Math.max(0, p0[0] - 36), top: p0[1] + 14 }]}>{names[0]}</Text> : null}
+          </View>
+        )}
+        {tpl === 0 ? (
+          <View style={{ position: 'absolute', left: 0, top: GH * 0.44, width: GW }}>
+            <View style={[s.rcBox, { borderColor: gc + 'AA', alignSelf: 'flex-start', minWidth: GW * 0.5 }]}>
+              <Text style={[s.rcBig, gold]}>{fmtDur(t.duration)}</Text>
+              <Text style={[s.rcMid, soft]}>{km} km</Text>
+              <Text style={[s.rcSm, soft]}>Maks. hız {sp} km/s</Text>
+            </View>
+            <View style={[s.rcSign, { marginTop: 10 }]}><Text style={s.rcSignT}>{sp}</Text></View>
+            <Text style={[s.rcMid, soft, { marginTop: 8 }]}>Varış · {arrive}</Text>
+            {P && <View style={s.rcBar}>{spBar(t.route).map((c, j) => <View key={j} style={{ flex: 1, backgroundColor: c }} />)}</View>}
+            <Text style={[s.rcMid, soft, { marginTop: 8 }]}>{fmtDur(t.duration)} · {km} km</Text>
+          </View>
+        ) : (
+          <View style={{ position: 'absolute', left: 0, top: GH * 0.43, width: GW }}>
+            <View style={[s.rcBox, { borderColor: gc + '88', alignSelf: 'flex-start' }]}>
+              <Text style={[s.rcMid, gold]}>{fmtDur(t.duration)}</Text>
+              <Text style={[s.rcSm, soft]}>Maks. hız {sp} km/s</Text>
+            </View>
+            <View style={[s.rcPanel, { borderColor: gc + '88', marginTop: 14 }]}>
+              {[[`${km} km`, 'Mesafe'], [fmtDur(t.duration), 'Süre'], [hm, 'Varış']].map(([v, l], j) => (
+                <View key={j} style={{ flex: 1, alignItems: 'center' }}><Text style={[s.rcBig2, gold]}>{v}</Text><Text style={[s.rcSm, soft]}>{l}</Text></View>
+              ))}
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 }}>
+              <View style={[s.rcGauge, { borderColor: gc + 'AA' }]}><Text style={[s.rcBig2, gold]}>{avg}</Text><Text style={[s.rcSm, soft]}>km/s</Text></View>
+              <View style={[s.rcPill, { flex: 1 }]}><Text style={[s.rcMid, soft]} numberOfLines={1}>{ME.car || 'Ortalama hız'}</Text></View>
+              <View style={[s.rcTile, { borderColor: gc }]}><Text style={[s.rcMid, gold]}>ApexDrive</Text></View>
+            </View>
+          </View>
+        )}
+      </View>
+    </>
+  );
+}
+
+// ---- Araç belgeleri: başlangıç tarihi + süre -> bitiş otomatik ----
+const DEFY = { sigorta: 1, kasko: 1, vize: 2 };
+const addYears = (d, n) => { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; };
+const fmtOut = (d) => `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
 
 function Detail({ t, onBack, onDelete }) {
   const [sharing, setSharing] = useState(false);
@@ -1080,6 +1276,8 @@ export default function App() {
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
   const pLoaded = useRef(false);
   const [pReady, setPReady] = useState(false);
+  const [dlg, setDlg] = useState(null);
+  Dlg.show = setDlg;
   const [tab, setTab] = useState('drive');
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
@@ -1146,7 +1344,7 @@ export default function App() {
       const photos = [...(old.photos || (old.photo ? [old.photo] : [])), ...added];
       saveRegions({ ...regionsRef.current, [key]: { ...old, photos, photo: photos[0] } });
       setCur((c) => (c && c.key === key ? { ...c, photo: photos[0] } : c));
-    } catch { Alert.alert('Fotoğraf eklenemedi', 'Galeri iznini kontrol et.'); }
+    } catch { AlertX.alert('Fotoğraf eklenemedi', 'Galeri iznini kontrol et.'); }
   };
   const delPhoto = (key, uri) => {
     const old = regionsRef.current[key], photos = (old.photos || []).filter((p) => p !== uri);
@@ -1156,7 +1354,7 @@ export default function App() {
 
   const start = async () => {
     const fg = await Location.requestForegroundPermissionsAsync();
-    if (fg.status !== 'granted') return Alert.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
+    if (fg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
     await Location.requestBackgroundPermissionsAsync().catch(() => {});
     R = fresh();
     setLive({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
@@ -1177,7 +1375,7 @@ export default function App() {
     onRef.current = false; setOn(false);
     if (pending.current) { setAsk(pending.current); pending.current = null; }
     const d = R, duration = (Date.now() - d.t0) / 1000;
-    if (d.dist < 0.05) return Alert.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
+    if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
     const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route };
     const n = [t, ...trips];
@@ -1236,6 +1434,7 @@ export default function App() {
   }, [vdocs, rem]);
   const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); };
 
+  ME.car = profile && profile.car ? `${profile.car.brand} ${profile.car.model}` : '';
   if (profile === undefined) return <View style={s.root} />;
   if (profile === null) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
   if (!profile.car) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome existing={profile} onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
@@ -1285,6 +1484,7 @@ export default function App() {
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'mod' && <ModStudio me={profile} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
+        <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
             <View style={s.modal}>
@@ -1383,5 +1583,25 @@ const mk = () => StyleSheet.create({
   rfill: { height: 6, backgroundColor: C.accent },
   sthumb: { width: 110, height: 140, borderRadius: 16, marginRight: 10, backgroundColor: C.line },
   storyBtn: { position: 'absolute', left: 16, bottom: 176, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.accent, borderRadius: 26, paddingVertical: 12, paddingHorizontal: 16 },
+  dlgBg: { flex: 1, backgroundColor: '#000B', alignItems: 'center', justifyContent: 'center', padding: 28 },
+  dlg: { width: '100%', maxWidth: 340, backgroundColor: C.card, borderRadius: 28, padding: 22, borderWidth: 1, borderColor: C.line },
+  dlgT: { color: C.text, fontSize: 19, fontWeight: '800' },
+  dlgM: { color: C.dim, fontSize: 15, marginTop: 8, lineHeight: 21 },
+  dlgB: { flex: 1, borderRadius: 20, paddingVertical: 13, alignItems: 'center' },
+  dlgBT: { fontWeight: '700', fontSize: 15 },
+  pvTop: { position: 'absolute', top: 40, left: 20, right: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  rcLbl: { position: 'absolute', fontSize: 12 },
+  rcBox: { borderWidth: 1, borderRadius: 12, padding: 10, backgroundColor: '#0006' },
+  rcBig: { fontSize: 26, fontWeight: '600' },
+  rcBig2: { fontSize: 19, fontWeight: '600' },
+  rcMid: { fontSize: 16 },
+  rcSm: { fontSize: 12 },
+  rcSign: { width: 46, height: 46, borderRadius: 23, borderWidth: 4, borderColor: '#E5483E', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000A' },
+  rcSignT: { color: '#fff', fontWeight: '800', fontSize: 17 },
+  rcBar: { flexDirection: 'row', height: 4, borderRadius: 2, overflow: 'hidden', marginTop: 8 },
+  rcPanel: { flexDirection: 'row', borderWidth: 1, borderRadius: 12, paddingVertical: 10, backgroundColor: '#0006' },
+  rcGauge: { width: 58, height: 58, borderRadius: 29, borderWidth: 3, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0006' },
+  rcPill: { borderRadius: 14, padding: 12, backgroundColor: '#0006' },
+  rcTile: { borderWidth: 1.5, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#0006' },
 });
 s = mk();
