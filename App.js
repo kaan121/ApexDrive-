@@ -85,6 +85,7 @@ const register = async (username, deviceId, car) => {
     return r.status === 409 ? 'taken' : r.ok ? 'ok' : 'err';
   } catch { return 'err'; }
 };
+const ensureProfile = (p) => online && api('profiles?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ username: p.username, device_id: p.deviceId, car_brand: p.car?.brand, car_model: p.car?.model, car_year: p.car?.year, vehicle_type: p.car?.vtype }) }).catch(() => {});
 const monthKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}`;
 const syncProfile = (p, trips) => {
   if (!online) return;
@@ -1057,6 +1058,14 @@ function ModStudio({ me, onClose }) {
 function SettingsModal({ prefs, setPrefs, onClose }) {
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
+  const [sv, setSv] = useState('');
+  const ping = async () => {
+    if (!online) return setSv('Sunucu adresi ayarlı değil (config.js boş).');
+    setSv('Deneniyor...');
+    const res = await Promise.all(['profiles', 'clubs', 'club_members', 'club_posts', 'stories', 'presence'].map(async (n) => { try { return [n, (await api(`${n}?select=*&limit=1`)).status]; } catch { return [n, 0]; } }));
+    const bad = res.filter(([, c]) => c !== 200);
+    setSv(bad.length ? 'Sorun var: ' + bad.map(([n, c]) => `${n} (${c || 'ulaşılamadı'})`).join(', ') + '. 404 = tablo yok, 401/403 = anahtar ya da izin, ulaşılamadı = adres yanlış.' : 'Sunucu hazır ✓ Tüm tablolara erişilebiliyor.');
+  };
   const check = async () => {
     if (!GH_REPO) return setSt('norepo');
     setSt('checking');
@@ -1086,6 +1095,10 @@ function SettingsModal({ prefs, setPrefs, onClose }) {
           <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
           <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
           <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+          <Box title="Sunucu" sub="Sıralama, kulüpler ve hikayeler için.">
+            {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
+            <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
+          </Box>
           <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}`}>
             {!!msg && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{msg}</Text>}
             <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
@@ -1282,6 +1295,7 @@ export default function App() {
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
   const [shareTrip, setShareTrip] = useState(null);
+  useEffect(() => { if (profile) ensureProfile(profile); }, [profile?.username]);
   const [vdocs, setVdocs] = useState({});
   const [rem, setRem] = useState({ start: 30, freq: 1, hour: 9 });
   const vLoaded = useRef(false);
@@ -1384,7 +1398,7 @@ export default function App() {
     setShareTrip(t);
   };
 
-  useEffect(() => { if (profile && trips.length) syncProfile(profile, trips); }, [profile, trips.length]);
+  useEffect(() => { if (profile && trips.length) Promise.resolve(ensureProfile(profile)).then(() => syncProfile(profile, trips)); }, [profile, trips.length]);
   const saveProfile = (p) => { setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
   const pickAvatar = async () => {
     try {
