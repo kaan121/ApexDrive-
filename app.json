@@ -2,7 +2,7 @@
   "expo": {
     "name": "ApexDrive",
     "slug": "apexdrive",
-    "version": "0.9.1",
+    "version": "0.10.0",
     "orientation": "portrait",
     "icon": "./icon.png",
     "userInterfaceStyle": "dark",
@@ -49,6 +49,15 @@
         {
           "icon": "./notification-icon.png",
           "color": "#2A9D9D"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./splash-icon.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#0B2B4A"
         }
       ]
     ]

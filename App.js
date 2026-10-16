@@ -3,8 +3,11 @@ import Svg, { Path, Circle, Defs, LinearGradient, Stop, Rect, Polygon } from 're
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
 import * as IntentLauncher from 'expo-intent-launcher';
+import * as SplashScreen from 'expo-splash-screen';
+import * as BackgroundTask from 'expo-background-task';
+import { Audio } from 'expo-av';
 import { GH_REPO, BUILD } from './repo';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, useColorScheme } from 'react-native';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, useColorScheme } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SUPA_URL, SUPA_KEY } from './config';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -17,6 +20,7 @@ import { captureRef } from 'react-native-view-shot';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+SplashScreen.preventAutoHideAsync().catch(() => {});
 const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: '#2E4545' };
 const LIGHT = { bg: '#F2F2F7', card: '#FFFFFF', line: '#D8D8DE', text: '#111114', dim: '#6B6B75', accent: '#2A9D9D', warn: '#E68600', sel: '#CFE8E8' };
 let C = DARK, s = null, curTheme = '';
@@ -33,27 +37,67 @@ const fmtTime = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = 
 const fmtDate = (t) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 // ---- Sürüş motoru: arka plan görevi ve ekran aynı veriyi kullanır ----
-const fresh = () => ({ t0: Date.now(), last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0 });
+const fresh = () => ({ t0: Date.now(), last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0, kf: null, rej: 0, cdir: 0, csum: 0, cquiet: 0 });
 let R = fresh();
 let onTick = null;
 
+const bearing = (a, b) => {
+  const r = Math.PI / 180, dl = (b.longitude - a.longitude) * r;
+  const y = Math.sin(dl) * Math.cos(b.latitude * r), x = Math.cos(a.latitude * r) * Math.sin(b.latitude * r) - Math.sin(a.latitude * r) * Math.cos(b.latitude * r) * Math.cos(dl);
+  return ((Math.atan2(y, x) / r) + 360) % 360;
+};
+// Viraj sayımı: aynı yönde süren yön değişimi toplamı 30°'yi geçerse bir sol/sağ viraj sayılır
+function finishCurve(d) { if (Math.abs(d.csum) >= 30) { if (d.csum > 0) d.right++; else d.left++; } d.csum = 0; d.cdir = 0; d.cquiet = 0; }
+function curveStep(d, sd, dt) {
+  const r = sd / dt;
+  if (Math.abs(r) >= 1.5) {
+    const dir = r > 0 ? 1 : -1;
+    if (d.cdir && dir !== d.cdir) finishCurve(d);
+    d.cdir = dir; d.csum += sd; d.cquiet = 0;
+  } else { d.cquiet += dt; if (d.cquiet >= 2) finishCurve(d); }
+}
+function turnsFromRoute(route) {
+  const d = { csum: 0, cdir: 0, cquiet: 0, left: 0, right: 0 };
+  if (!route || route.length < 8) return d;
+  let prev = null;
+  for (let i = 3; i < route.length; i++) {
+    const hd = bearing(route[i - 3], route[i]), v = Math.max((route[i].v || 30) / 3.6, 3);
+    if (prev != null) curveStep(d, ((hd - prev + 540) % 360) - 180, 8 / v);
+    prev = hd;
+  }
+  finishCurve(d);
+  return d;
+}
+// GPS konumunu doğruluk bilgisine göre yumuşatır (Kalman)
+function smooth(d, c, t, v) {
+  const acc = Math.max(c.accuracy || 10, 3);
+  if (!d.kf) { d.kf = { lat: c.latitude, lon: c.longitude, v: acc * acc, t }; return d.kf; }
+  const k = d.kf, dt = Math.max(0, (t - k.t) / 1000);
+  k.v += dt * Math.pow(Math.max(v, 2), 2);
+  const g = k.v / (k.v + acc * acc);
+  k.lat += g * (c.latitude - k.lat); k.lon += g * (c.longitude - k.lon); k.v *= 1 - g; k.t = t;
+  return k;
+}
 function processLoc(loc) {
   const c = loc.coords, t = loc.timestamp, d = R;
-  if (c.accuracy > 30) return;
+  if (c.accuracy > 22) return;
   const dt = d.last ? (t - d.last.t) / 1000 : 0;
-  // Hız: GPS'in Doppler hızı; yoksa koordinat farkından (makul sınırda)
   const v = c.speed != null && c.speed >= 0 ? c.speed : dt > 0 ? Math.min((hav(d.last.c, c) * 1000) / dt, 80) : 0;
+  if (d.last && d.kf) { // GPS sıçraması: mantıksız uzak nokta atılır
+    const jump = hav({ latitude: d.kf.lat, longitude: d.kf.lon }, c) * 1000;
+    if (dt > 0 && jump > (Math.max(v, d.last.v) + 3) * dt * 2 + c.accuracy + 15 && d.rej < 4) { d.rej++; return; }
+  }
+  d.rej = 0;
+  const kf = smooth(d, c, t, v), pos = { latitude: kf.lat, longitude: kf.lon };
+  const hd = c.heading >= 0 && v > 1.5 ? c.heading : d.last && v > 2 && hav(d.last.pos, pos) > 0.003 ? bearing(d.last.pos, pos) : -1;
   if (d.last && dt >= 0.5 && dt < 10) {
-    // Mesafe hızdan hesaplanır: duran araçta GPS sapması mesafe sayılmaz
     if (v > 1) { d.dist += (((v + d.last.v) / 2) * dt) / 1000; d.movingMs += dt * 1000; }
     const a = Math.max(-12, Math.min(12, (v - d.last.v) / dt));
     let lat = 0, sd = 0;
-    if (c.heading >= 0 && d.last.c.heading >= 0 && v > 2.5) { sd = ((c.heading - d.last.c.heading + 540) % 360) - 180; lat = v * (Math.abs(sd) * Math.PI / 180) / dt; }
+    if (hd >= 0 && d.last.hd >= 0 && v > 2 && d.last.v > 2) { sd = ((hd - d.last.hd + 540) % 360) - 180; lat = v * (Math.abs(sd) * Math.PI / 180) / dt; }
+    curveStep(d, sd, dt);
     d.latS = d.latS * 0.6 + lat * 0.4; d.aS = d.aS * 0.5 + a * 0.5;
     d.maxAcc = Math.max(d.maxAcc, Math.min(a, 8)); d.maxDec = Math.max(d.maxDec, Math.min(-a, 8));
-    // Dönüş: yön değişimi hızlı birikirse (yaklaşık 55°+) bir dönüş sayılır; yumuşak virajlar ve GPS titremesi sayılmaz
-    d.turn = d.turn * 0.85 + sd;
-    if (Math.abs(d.turn) >= 55 && t - d.lastTurn > 3000) { if (d.turn > 0) d.right++; else d.left++; d.turn = 0; d.lastTurn = t; }
     if (t - d.lastEv > 3000) {
       if (a > 2.5) { d.acc++; d.lastEv = t; }
       else if (a < -3) { d.brake++; d.lastEv = t; }
@@ -64,14 +108,53 @@ function processLoc(loc) {
   if (v >= 2) { d.moved = true; d.stopped = false; d.stillSince = 0; }
   else if (v < 1) { if (!d.stillSince) d.stillSince = t; if (d.moved && !d.stopped && t - d.stillSince >= 4000) { d.stops++; d.stopped = true; } }
   if (v * 3.6 < 400 && v > 1) d.max = Math.max(d.max, v * 3.6);
-  const p = { latitude: c.latitude, longitude: c.longitude, v: Math.round(v * 3.6) };
   const lp = d.route[d.route.length - 1];
-  if ((!lp || (v > 1 && hav(lp, p) > 0.01)) && d.route.length < 4000) d.route.push(p);
-  d.last = { c, t, v };
+  const back = lp && v > 3 && c.heading >= 0 && angDiff(bearing(lp, pos), c.heading) > 100; // geri sapan titreşim noktaları atılır
+  if ((!lp || (v > 2 && hav(lp, pos) > 0.008 && !back)) && d.route.length < 4000) d.route.push({ latitude: pos.latitude, longitude: pos.longitude, v: Math.round(v * 3.6) });
+  d.last = { c, t, v, hd, pos };
   onTick && onTick();
+}
+// Rotayı yola oturtma (OpenStreetMap yol verisi, OSRM)
+async function snapRoute(route) {
+  if (!route || route.length < 5) return null;
+  const step = Math.max(1, Math.ceil(route.length / 360)), pts = route.filter((_, i) => i % step === 0 || i === route.length - 1), out = [];
+  for (let a = 0; a < pts.length - 1; a += 80) {
+    const seg = pts.slice(a, Math.min(pts.length, a + 81));
+    if (seg.length < 2) break;
+    let got = null;
+    try {
+      const url = `https://router.project-osrm.org/match/v1/driving/${seg.map((p) => p.longitude.toFixed(5) + ',' + p.latitude.toFixed(5)).join(';')}?overview=full&geometries=geojson&gaps=ignore&tidy=true&radiuses=${seg.map(() => 30).join(';')}`;
+      const j = await (await fetch(url)).json();
+      if (j.code === 'Ok' && j.matchings && j.matchings.length) got = j.matchings.flatMap((m) => m.geometry.coordinates);
+    } catch {}
+    if (got && got.length > 1) got.forEach((g, i) => out.push({ latitude: g[1], longitude: g[0], v: seg[Math.min(seg.length - 1, Math.round((i / (got.length - 1)) * (seg.length - 1)))].v }));
+    else seg.forEach((p) => out.push(p));
+  }
+  const k = Math.ceil(out.length / 3000);
+  return out.length > 1 ? out.filter((_, i) => i % k === 0 || i === out.length - 1) : null;
 }
 Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
 TaskManager.defineTask(TASK, ({ data, error }) => { if (!error && data?.locations) data.locations.forEach(processLoc); });
+async function fetchLatest() {
+  if (!GH_REPO) return null;
+  const j = await (await fetch(`https://api.github.com/repos/${GH_REPO}/releases/latest`)).json();
+  const n = parseInt(String(j.tag_name).replace(/\D/g, ''), 10), apk = (j.assets || []).find((a) => a.name.endsWith('.apk'));
+  return n > BUILD && apk ? { n, url: apk.browser_download_url, page: j.html_url } : null;
+}
+async function notifyUpdate() {
+  try {
+    const r = await fetchLatest();
+    if (!r) return null;
+    const last = parseInt((await AsyncStorage.getItem('@apexdrive_notified')) || '0', 10);
+    if (r.n > last) {
+      await AsyncStorage.setItem('@apexdrive_notified', String(r.n));
+      await Notifications.scheduleNotificationAsync({ content: { title: 'ApexDrive yeni sürümü çıktı 🚀', body: 'Yeni özellikler hazır. Güncellemek ister misin?', data: { to: 'update' } }, trigger: null });
+    }
+    return r;
+  } catch { return null; }
+}
+const UPD_TASK = 'apexdrive-update-check';
+TaskManager.defineTask(UPD_TASK, async () => { await notifyUpdate(); return BackgroundTask.BackgroundTaskResult.Success; });
 
 // ---- Yardımcılar: toplamlar ve sıralama sunucusu ----
 const totals = (trips) => trips.reduce((a, t) => ({ dist: a.dist + t.dist, time: a.time + t.duration, still: a.still + (t.still || 0), n: a.n + 1, top: Math.max(a.top, t.max), left: a.left + (t.left || 0), right: a.right + (t.right || 0), brake: a.brake + t.brake, hacc: a.hacc + t.acc, dec: Math.max(a.dec, t.maxDec || 0), acc: Math.max(a.acc, t.maxAcc || 0), g: Math.max(a.g, t.maxG), stops: a.stops + t.stops }), { dist: 0, time: 0, still: 0, n: 0, top: 0, left: 0, right: 0, brake: 0, hacc: 0, dec: 0, acc: 0, g: 0, stops: 0 });
@@ -379,15 +462,14 @@ function Board({ me, friends, addFriend }) {
   );
 }
 
-function Profile({ me, trips, terr, prefs, setPrefs, onAvatar, onDelete }) {
+function Profile({ me, trips, terr, onSettings, onUpdate, onAvatar, onDelete }) {
   const [sel, setSel] = useState(null);
-  const [settings, setSettings] = useState(false);
-  if (sel) return <Detail t={sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} />;
+  if (sel) return <Detail t={trips.find((x) => x.id === sel.id) || sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} onUpdate={onUpdate} />;
   const tt = totals(trips);
   const lp = tt.left + tt.right ? (tt.left / (tt.left + tt.right)) * 100 : 50;
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Profil</Text><TouchableOpacity onPress={() => setSettings(true)} style={{ padding: 6 }}><Ionicons name="settings-outline" size={26} color={C.text} /></TouchableOpacity></View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Profil</Text><TouchableOpacity onPress={onSettings} style={{ padding: 6 }}><Ionicons name="settings-outline" size={26} color={C.text} /></TouchableOpacity></View>
       <View style={[s.row, { alignItems: 'center' }]}>
         <TouchableOpacity onPress={onAvatar}>
           {me.avatar ? <Image style={s.avatar} source={{ uri: me.avatar }} /> : <View style={[s.avatar, { alignItems: 'center', justifyContent: 'center' }]}><Ionicons name="camera" size={28} color={C.dim} /></View>}
@@ -429,8 +511,7 @@ function Profile({ me, trips, terr, prefs, setPrefs, onAvatar, onDelete }) {
         <Card icon="swap-horizontal" color={C.dim} label="Ort. Trip Uzunluğu" value={(tt.n ? tt.dist / tt.n : 0).toFixed(1)} unit="km" />
         <Card wide icon="map" color="#BF5AF2" label="Ele Geçirilen Bölge" value={terr} />
       </Grid>
-      {settings && <SettingsModal prefs={prefs} setPrefs={setPrefs} onClose={() => setSettings(false)} />}
-      <Text style={s.sec}>Sürüşlerim</Text>
+            <Text style={s.sec}>Sürüşlerim</Text>
       {trips.length === 0 && <Text style={s.hint}>Henüz sürüş yok. Sağ alttaki oynat tuşuyla başlat.</Text>}
       {trips.map((t) => (
         <TouchableOpacity key={t.id} style={s.item} onPress={() => setSel(t)}>
@@ -647,6 +728,7 @@ const Chips = ({ opts, val, onPick }) => (
   </View>
 );
 
+const RATIOS = [['1:1', 1], ['3:4', 4 / 3], ['4:5', 1.25], ['9:16', 16 / 9], ['4:3', 0.75], ['16:9', 0.5625]];
 const THEMES = ['#0B1F2E', '#2A1245', '#3A1010', '#10321F'];
 const TCOLORS = ['#FFFFFF', '#6EC7C7', '#FFD60A', '#FF9500', '#FF453A', '#BF5AF2', '#34C759', '#0A84FF'];
 const FONTS = [['Klasik', { fontWeight: '800' }], ['İtalik', { fontWeight: '800', fontStyle: 'italic' }], ['İnce', { fontWeight: '300' }], ['Mono', { fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }), fontWeight: '700' }], ['Serif', { fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }), fontWeight: '700' }]];
@@ -654,7 +736,7 @@ function ShareSheet({ t, onClose }) {
   const W = Dimensions.get('window').width - 40;
   const [bg, setBg] = useState(0), [photo, setPhoto] = useState(null), [layout, setLayout] = useState(0), [rs, setRs] = useState(0), [fi, setFi] = useState(0), [tc, setTc] = useState(TCOLORS[0]), [dim, setDim] = useState(1);
   const shot = useRef(null);
-  const [tpl, setTpl] = useState(0), [scene, setScene] = useState(0), [gc, setGc] = useState(GCOL[0]), [names, setNames] = useState([]), [persp, setPersp] = useState(true);
+  const [tpl, setTpl] = useState(0), [scene, setScene] = useState(0), [gc, setGc] = useState(GCOL[0]), [names, setNames] = useState([]), [persp, setPersp] = useState(true), [ri, setRi] = useState(2);
   useEffect(() => {
     if (!t.route || t.route.length < 2) return;
     let live = true;
@@ -673,29 +755,32 @@ function ShareSheet({ t, onClose }) {
     catch { AlertX.alert('Paylaşılamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
   };
   const F = FONTS[fi][1];
+  const rf = tpl < 2 && RATIOS[ri][1] < 1 ? 1.25 : RATIOS[ri][1], cardH = W * rf;
   const L = (k, v) => <View style={{ alignItems: 'center', marginBottom: 8 }}><Text style={[s.shL, F, { color: tc + 'CC', fontWeight: '400' }]}>{k}</Text><Text style={[s.shV, F, { color: tc }]}>{v}</Text></View>;
   const Sec = ({ children }) => <Text style={[s.itemSub, { alignSelf: 'flex-start', marginTop: 16 }]}>{children}</Text>;
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
-          <View ref={shot} collapsable={false} style={{ width: W, height: tpl === 2 ? W : W * 1.25, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg] }}>
-            {tpl < 2 ? <RoadCard t={t} W={W} tpl={tpl} photo={photo} scene={scene} gc={gc} dim={dim} names={names} persp={persp} /> : (<>
+          <View ref={shot} collapsable={false} style={{ width: W, height: cardH, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg] }}>
+            {tpl < 2 ? <RoadCard t={t} W={W} H={cardH} tpl={tpl} photo={photo} scene={scene} gc={gc} dim={dim} names={names} persp={persp} /> : (<>
             {photo && <Image source={{ uri: photo }} style={StyleSheet.absoluteFill} resizeMode="cover" />}
             <View style={[StyleSheet.absoluteFill, { backgroundColor: photo ? `rgba(0,0,0,${[0, 0.35, 0.6][dim]})` : 'transparent', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 26 }]}>
               <View style={{ alignItems: 'center' }}>
                 {L('Mesafe', `${t.dist < 10 ? t.dist.toFixed(1) : Math.round(t.dist)} km`)}
-                {layout < 2 && L('Süre', fmtDur(t.duration))}
-                {layout === 1 && L('Maks. hız', `${Math.round(t.max)} km/s`)}
-                {layout === 1 && L('Ort. hız', `${Math.round(Math.min(t.avg, t.max))} km/s`)}
+                {layout < 2 && cardH >= W * 0.8 && L('Süre', fmtDur(t.duration))}
+                {layout === 1 && cardH >= W * 0.8 && L('Maks. hız', `${Math.round(t.max)} km/s`)}
+                {layout === 1 && cardH >= W * 0.8 && L('Ort. hız', `${Math.round(Math.min(t.avg, t.max))} km/s`)}
               </View>
-              <RouteSvg route={t.route} w={W - 60} h={W * (layout === 1 ? 0.3 : 0.42)} rs={rs} color={tc} />
+              <RouteSvg route={t.route} w={W - 60} h={cardH * (layout === 1 ? 0.3 : 0.42)} rs={rs} color={tc} />
               <Text style={[s.shBrand, F, { color: tc }]}>ApexDrive</Text>
             </View>
           </>)}
           </View>
           <Sec>Şablon</Sec>
           <View style={{ alignSelf: 'flex-start' }}><Chips opts={[['Yol 1', 0], ['Yol 2', 1], ['Klasik', 2]]} val={tpl} onPick={setTpl} /></View>
+          <Sec>Oran</Sec>
+          <View style={{ alignSelf: 'flex-start' }}><Chips opts={RATIOS.map(([l], i) => [l, i]).filter(([, i]) => tpl === 2 || RATIOS[i][1] >= 1)} val={rf === RATIOS[ri][1] ? ri : 2} onPick={setRi} /></View>
           {tpl < 2 && (
             <>
               <Sec>Arka plan</Sec>
@@ -742,9 +827,27 @@ function ShareSheet({ t, onClose }) {
 const DOCS = [['sigorta', 'Trafik Sigortası', 'shield-checkmark'], ['kasko', 'Kasko', 'car-sport'], ['vize', 'Muayene / Vize', 'document-text']];
 const parseDate = (x) => { const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(x || ''); if (!m) return null; const d = new Date(+m[3], +m[2] - 1, +m[1]); return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1 ? d : null; };
 const daysLeft = (d) => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 86400000); };
+const GAS = ['Bugün gazlama yapmadık 🏁 Gazlamak ister misin?', 'Yollar seni bekliyor! Bugün bir tur atalım mı?', 'Bugün haritada yeni bölgeler seni bekliyor 🗺️', 'Bir sürüş yap, rekorlarını geliştir 🔥', 'Bugün gazlama yapmadık, ne dersin? 🏍️🚗'];
+async function scheduleDaily(prefs, trips) {
+  try {
+    const all = await Notifications.getAllScheduledNotificationsAsync();
+    await Promise.all(all.filter((n) => String(n.identifier).startsWith('gas-')).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
+    if (!prefs.daily) return;
+    const perm = await Notifications.requestPermissionsAsync();
+    if (!perm.granted) return;
+    if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('default', { name: 'Hatırlatmalar', importance: Notifications.AndroidImportance.HIGH });
+    const drove = trips.some((t) => new Date(t.start).toDateString() === new Date().toDateString());
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(); d.setDate(d.getDate() + i); d.setHours(prefs.daily, 0, 0, 0);
+      if (d.getTime() <= Date.now() || (i === 0 && drove)) continue;
+      await Notifications.scheduleNotificationAsync({ identifier: `gas-${i}`, content: { title: 'ApexDrive', body: GAS[d.getDate() % GAS.length], data: { to: 'drive' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: d } });
+    }
+  } catch {}
+}
 async function scheduleReminders(docs, rem) {
   try {
-    await Notifications.cancelAllScheduledNotificationsAsync();
+    const all = await Notifications.getAllScheduledNotificationsAsync();
+    await Promise.all(all.filter((n) => !String(n.identifier).startsWith('gas-')).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
     if (!DOCS.some(([k]) => parseDate(docs[k]))) return;
     const perm = await Notifications.requestPermissionsAsync();
     if (!perm.granted) return;
@@ -755,7 +858,7 @@ async function scheduleReminders(docs, rem) {
       for (let o = rem.start; o > 0; o -= rem.freq) offs.add(o);
       const times = [...offs].map((o) => { const t = new Date(d); t.setDate(t.getDate() - o); t.setHours(rem.hour, 0, 0, 0); return { t, o }; }).filter((x) => x.t.getTime() > Date.now()).sort((a, b) => a.t - b.t).slice(0, 15);
       for (const { t, o } of times) {
-        await Notifications.scheduleNotificationAsync({ content: { title: `${label} hatırlatması`, body: o === 0 ? `${label} bugün bitiyor!` : `${label} bitişine ${o} gün kaldı.` }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t } });
+        await Notifications.scheduleNotificationAsync({ identifier: `veh-${k}-${o}`, content: { title: `${label} hatırlatması`, body: o === 0 ? `${label} bugün bitiyor!` : `${label} bitişine ${o} gün kaldı.` }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t } });
       }
     }
   } catch {}
@@ -829,11 +932,15 @@ function ReplayBox({ t }) {
 
 function PersonSheet({ u, onClose }) {
   const [pr, setPr] = useState(null), [st, setSt] = useState([]), [big, setBig] = useState(null);
+  const bm = (() => { try { return big && big.music ? JSON.parse(big.music) : null; } catch { return null; } })();
+  useEffect(() => { if (bm) playClip(bm.url, bm.start); return () => { stopClip(); }; }, [big]);
   useEffect(() => {
     (async () => {
       try {
         setPr((await (await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year`)).json())[0] || { username: u });
         setSt(await (await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at`)).json());
+        const rs = await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at,music`);
+        if (rs.ok) setSt(await rs.json());
       } catch {}
     })();
   }, [u]);
@@ -861,6 +968,7 @@ function PersonSheet({ u, onClose }) {
           <TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}>
             <Image source={{ uri: big.img }} style={{ width: '100%', height: '75%' }} resizeMode="contain" />
             <Text style={{ color: '#fff', textAlign: 'center', marginTop: 12, fontSize: 16 }}>{big.caption}</Text>
+            {bm && <Text style={{ color: '#ddd', textAlign: 'center', marginTop: 6 }}>♫ {bm.title} — {bm.artist}</Text>}
           </TouchableOpacity>
         </Modal>
       )}
@@ -868,34 +976,194 @@ function PersonSheet({ u, onClose }) {
   );
 }
 
+// ---- Açılış animasyonu ----
+function Intro({ onDone }) {
+  const t = useRef(new Animated.Value(0)).current, fade = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+    Animated.sequence([
+      Animated.timing(t, { toValue: 1, duration: 1700, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(fade, { toValue: 0, duration: 350, useNativeDriver: true }),
+    ]).start(() => onDone());
+  }, []);
+  const I = (r, o, x) => t.interpolate({ inputRange: r, outputRange: o, ...(x || {}) });
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#0B2B4A', alignItems: 'center', justifyContent: 'center', opacity: fade }]}>
+      <StatusBar style="light" />
+      {[0.34, 0.5, 0.66].map((y, i) => (
+        <Animated.View key={i} style={{ position: 'absolute', top: `${y * 100}%`, left: 0, width: 180, height: 3, borderRadius: 2, backgroundColor: i === 1 ? '#FF9A3C' : '#6EC7C7', opacity: I([0, 0.3, 0.8, 1], [0, 0.9, 0.5, 0]), transform: [{ translateX: I([0, 1], [-200, 620 + i * 40]) }] }} />
+      ))}
+      <Animated.View style={{ position: 'absolute', width: 220, height: 220, borderRadius: 110, borderWidth: 2, borderColor: '#6EC7C7', opacity: I([0, 0.25, 1], [0, 0.6, 0]), transform: [{ scale: I([0, 1], [0.7, 2.4]) }] }} />
+      <Animated.Image source={require('./splash-icon.png')} style={{ width: 220, height: 220, transform: [{ scale: I([0, 0.45, 1], [1, 1.1, 1]) }] }} resizeMode="contain" />
+      <Animated.Text style={{ color: '#fff', fontSize: 30, fontWeight: '800', fontStyle: 'italic', marginTop: 6, opacity: I([0.3, 0.7], [0, 1], { extrapolate: 'clamp' }), transform: [{ translateY: I([0.3, 0.7], [16, 0], { extrapolate: 'clamp' }) }] }}>ApexDrive</Animated.Text>
+    </Animated.View>
+  );
+}
+
+// ---- Müzik (iTunes önizleme) ----
+const sfx = { s: null };
+async function stopClip() { try { if (sfx.s) await sfx.s.unloadAsync(); } catch {} sfx.s = null; }
+async function playClip(url, start) {
+  await stopClip();
+  try {
+    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+    const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true, positionMillis: start * 1000 });
+    sfx.s = sound;
+    sound.setOnPlaybackStatusUpdate((st) => { if (st.isLoaded && st.positionMillis >= (start + 15) * 1000) sound.setPositionAsync(start * 1000).catch(() => {}); });
+  } catch {}
+}
+function MusicSheet({ onPick, onClose }) {
+  const [q, setQ] = useState(''), [res, setRes] = useState([]), [busy, setBusy] = useState(false), [sel, setSel] = useState(null), [start, setStart] = useState(0), [err, setErr] = useState('');
+  useEffect(() => () => { stopClip(); }, []);
+  const search = async () => {
+    if (!q.trim()) return;
+    setBusy(true); setErr('');
+    try {
+      const j = await (await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q.trim())}&media=music&entity=song&limit=25&country=TR`)).json();
+      const r = (j.results || []).filter((x) => x.previewUrl);
+      setRes(r); if (!r.length) setErr('Sonuç bulunamadı.');
+    } catch { setErr('Arama yapılamadı. İnternetini kontrol et.'); }
+    setBusy(false);
+  };
+  const choose = (r) => { setSel(r); playClip(r.previewUrl, start); };
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, height: '78%' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Müzik ekle</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={q} onChangeText={setQ} onSubmitEditing={search} returnKeyType="search" placeholder="Şarkı veya sanatçı ara" placeholderTextColor={C.dim} />
+            <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={search}><Ionicons name="search" size={18} color="#06101F" /></TouchableOpacity>
+          </View>
+          {busy && <ActivityIndicator color={C.accent} style={{ marginTop: 12 }} />}
+          {!!err && <Text style={s.hint}>{err}</Text>}
+          <FlatList data={res} keyExtractor={(r) => String(r.trackId)} style={{ marginTop: 10 }} keyboardShouldPersistTaps="handled" renderItem={({ item }) => (
+            <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center' }, sel?.trackId === item.trackId && { borderWidth: 1, borderColor: C.accent }]} onPress={() => choose(item)}>
+              <Image source={{ uri: item.artworkUrl100 }} style={{ width: 46, height: 46, borderRadius: 10, marginRight: 12 }} />
+              <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{item.trackName}</Text><Text style={s.itemSub} numberOfLines={1}>{item.artistName}</Text></View>
+              <Ionicons name={sel?.trackId === item.trackId ? 'volume-high' : 'play-circle'} size={26} color={C.accent} />
+            </TouchableOpacity>
+          )} />
+          {sel && (
+            <View>
+              <Text style={[s.itemSub, { marginTop: 8 }]}>Hangi kısım çalsın? (15 sn)</Text>
+              <Chips opts={[0, 5, 10, 15].map((x) => [`${x}–${x + 15} sn`, x])} val={start} onPick={(x) => { setStart(x); playClip(sel.previewUrl, x); }} />
+              <TouchableOpacity style={s.btn} onPress={() => { stopClip(); onPick({ title: sel.trackName, artist: sel.artistName, art: sel.artworkUrl100, url: sel.previewUrl, start }); }}><Text style={s.btnText}>Ekle</Text></TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+const MusicPill = ({ m }) => (
+  <View style={s.edPill}>
+    {m.art ? <Image source={{ uri: m.art }} style={{ width: 38, height: 38, borderRadius: 8 }} /> : null}
+    <View style={{ marginLeft: 8, maxWidth: 170 }}><Text style={s.edPT} numberOfLines={1}>{m.title}</Text><Text style={s.edPA} numberOfLines={1}>{m.artist}</Text></View>
+    <Ionicons name="musical-notes" size={18} color="#fff" style={{ marginLeft: 8 }} />
+  </View>
+);
+function Drag({ children, x0 = 0, y0 = 0 }) {
+  const pos = useRef(new Animated.ValueXY({ x: x0, y: y0 })).current;
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => { pos.setOffset({ x: pos.x._value, y: pos.y._value }); pos.setValue({ x: 0, y: 0 }); },
+    onPanResponderMove: Animated.event([null, { dx: pos.x, dy: pos.y }], { useNativeDriver: false }),
+    onPanResponderRelease: () => pos.flattenOffset(),
+  })).current;
+  return <Animated.View {...pan.panHandlers} style={{ position: 'absolute', transform: pos.getTranslateTransform() }}>{children}</Animated.View>;
+}
+const SR = [['9:16', 16 / 9], ['4:5', 1.25], ['1:1', 1]];
+function StoryEditor({ uri, onDone, onCancel }) {
+  const { width: SW, height: SH } = Dimensions.get('window');
+  const [ri, setRi] = useState(0), [items, setItems] = useState([]), [txt, setTxt] = useState(null), [mus, setMus] = useState(false), [busy, setBusy] = useState(false);
+  const shot = useRef(null);
+  const ch = Math.min((SW - 32) * SR[ri][1], SH * 0.64), cw = ch / SR[ri][1];
+  const add = (it) => setItems((p) => [...p, { id: Date.now() + Math.random(), ...it }]);
+  const done = async () => {
+    setBusy(true);
+    try {
+      const b = await captureRef(shot, { format: 'jpg', quality: 0.65, result: 'base64', width: 720, height: Math.round(720 * SR[ri][1]) });
+      const m = items.filter((x) => x.kind === 'music').pop();
+      onDone(b, SR[ri][1], m ? m.m : null);
+    } catch { AlertX.alert('Hazırlanamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
+    setBusy(false);
+  };
+  return (
+    <Modal visible animationType="slide" onRequestClose={onCancel}>
+      <SafeAreaView style={s.root}>
+        <View style={s.edTop}>
+          <TouchableOpacity onPress={onCancel} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity>
+          <TouchableOpacity style={s.edOk} onPress={done} disabled={busy}><Ionicons name="checkmark" size={20} color="#06101F" /><Text style={s.btnText}>{busy ? '...' : 'Tamam'}</Text></TouchableOpacity>
+        </View>
+        <View style={{ alignItems: 'center' }}>
+          <View style={{ width: cw, height: ch }}>
+            <View ref={shot} collapsable={false} style={{ width: cw, height: ch, borderRadius: 18, overflow: 'hidden', backgroundColor: '#000' }}>
+              <Image source={{ uri }} style={{ width: cw, height: ch }} resizeMode="cover" />
+              {items.map((it) => (
+                <Drag key={it.id} x0={cw * 0.12} y0={ch * (it.kind === 'music' ? 0.7 : 0.4)}>
+                  {it.kind === 'text' ? <Text style={[s.edTxt, { color: it.c }]}>{it.t}</Text> : <MusicPill m={it.m} />}
+                </Drag>
+              ))}
+            </View>
+            <View style={s.edTools}>
+              <TouchableOpacity style={s.edBtn} onPress={() => setTxt({ t: '', c: '#FFFFFF' })}><Text style={{ color: '#fff', fontWeight: '800', fontSize: 17 }}>Aa</Text></TouchableOpacity>
+              <TouchableOpacity style={s.edBtn} onPress={() => setMus(true)}><Ionicons name="musical-notes" size={22} color="#fff" /></TouchableOpacity>
+              <TouchableOpacity style={s.edBtn} onPress={() => setItems((p) => p.slice(0, -1))}><Ionicons name="arrow-undo" size={22} color="#fff" /></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+        <View style={{ alignItems: 'center', marginTop: 12 }}><Chips opts={SR.map(([l], i) => [l, i])} val={ri} onPick={setRi} /></View>
+        <Text style={[s.hint, { marginTop: 8 }]}>Yazıyı ve müzik etiketini sürükleyerek yerleştir.</Text>
+        {txt && (
+          <Modal visible transparent animationType="fade" onRequestClose={() => setTxt(null)}>
+            <View style={s.modalBg}>
+              <View style={s.modal}>
+                <TextInput style={[s.input, { marginTop: 0 }]} value={txt.t} onChangeText={(t) => setTxt({ ...txt, t })} placeholder="Yazını yaz" placeholderTextColor={C.dim} autoFocus maxLength={80} multiline />
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 14 }}>
+                  {TCOLORS.map((c) => <TouchableOpacity key={c} onPress={() => setTxt({ ...txt, c })} style={[s.dot, { width: 34, height: 34, borderRadius: 17, backgroundColor: c, borderColor: txt.c === c ? C.accent : C.line }]} />)}
+                </View>
+                <TouchableOpacity style={s.btn} onPress={() => { if (txt.t.trim()) add({ kind: 'text', t: txt.t.trim(), c: txt.c }); setTxt(null); }}><Text style={s.btnText}>Ekle</Text></TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+        )}
+        {mus && <MusicSheet onClose={() => setMus(false)} onPick={(m) => { add({ kind: 'music', m }); setMus(false); }} />}
+      </SafeAreaView>
+    </Modal>
+  );
+}
 function StoryComposer({ me, pos, onClose }) {
-  const [img, setImg] = useState(null), [cap, setCap] = useState(''), [busy, setBusy] = useState(false);
+  const [uri, setUri] = useState(null), [img, setImg] = useState(null), [ratio, setRatio] = useState(1.25), [music, setMusic] = useState(null), [cap, setCap] = useState(''), [busy, setBusy] = useState(false);
   useEffect(() => {
     (async () => {
       try {
-        const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [4, 5] });
-        if (r.canceled) onClose(); else setImg(`data:image/jpeg;base64,${r.assets[0].base64}`);
+        const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9 });
+        if (r.canceled) onClose(); else setUri(r.assets[0].uri);
       } catch { onClose(); }
     })();
   }, []);
   const post = async () => {
-    if (img.length > 900000) return AlertX.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
     setBusy(true);
     try {
       await api('stories?created_at=lt.' + new Date(Date.now() - 864e5).toISOString(), { method: 'DELETE' });
-      const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: cap.trim(), img }) });
+      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: cap.trim(), img };
+      let r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(music ? { ...row, music: JSON.stringify(music) } : row) });
+      if (!r.ok && music) r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(row) });
       if (!r.ok) throw 0;
       onClose();
     } catch { AlertX.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
     setBusy(false);
   };
-  if (!img) return null;
+  if (!uri) return null;
+  if (!img) return <StoryEditor uri={uri} onCancel={onClose} onDone={(b, r, m) => { setImg(`data:image/jpeg;base64,${b}`); setRatio(r); setMusic(m); }} />;
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
           <Text style={s.title}>Hikaye paylaş</Text>
-          <Image source={{ uri: img }} style={{ width: '100%', aspectRatio: 0.8, borderRadius: 24 }} />
+          <Image source={{ uri: img }} style={{ width: '100%', aspectRatio: 1 / ratio, borderRadius: 24 }} />
+          {music && <Text style={[s.itemSub, { marginTop: 10 }]}>♫ {music.title} — {music.artist}</Text>}
           <TextInput style={s.input} value={cap} onChangeText={setCap} placeholder="Bir şey yaz (isteğe bağlı)" placeholderTextColor={C.dim} maxLength={120} />
           <Text style={s.hint}>Hikaye 24 saat görünür ve yaklaşık konumunla (≈1 km) paylaşılır.</Text>
           <TouchableOpacity style={s.btn} onPress={post} disabled={busy}><Text style={s.btnText}>{busy ? 'Paylaşılıyor...' : 'Paylaş'}</Text></TouchableOpacity>
@@ -1019,43 +1287,94 @@ const MODS = [
   ['Jant', [['Stok', ''], ['Siyah jant', 'black alloy wheels'], ['Altın jant', 'gold forged wheels'], ['Büyük krom', 'large chrome wheels']]],
   ['Gövde kiti', [['Stok', ''], ['Geniş kasa', 'wide body kit'], ['Spoyler', 'big rear wing spoiler'], ['Karbon parça', 'carbon fiber aero parts']]],
   ['Duruş', [['Stok', ''], ['Alçaltılmış', 'lowered stance'], ['Yükseltilmiş', 'lifted off-road stance']]],
-  ['Ortam', [['Gün batımı yol', 'on a coastal road at sunset'], ['Gece şehir', 'in a neon city at night'], ['Pist', 'on a race track'], ['Stüdyo', 'in a clean photo studio']]],
+  ['Ortam', [['Aynı kalsın', ''], ['Gün batımı yol', 'on a coastal road at sunset'], ['Gece şehir', 'in a neon city at night'], ['Pist', 'on a race track'], ['Stüdyo', 'in a clean photo studio']]],
 ];
+const AIK = '@apexdrive_aikey';
+let AIM = null;
+async function aiModel(key) {
+  if (AIM) return AIM;
+  const j = await (await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } })).json();
+  if (j.error) { const e = new Error(j.error.message || 'anahtar'); e.code = j.error.code; throw e; }
+  const ok = (j.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent') && /image/i.test(m.name) && !/imagen/i.test(m.name));
+  const pick = ok.find((m) => /flash/i.test(m.name) && !/preview/i.test(m.name)) || ok.find((m) => /flash/i.test(m.name)) || ok[0];
+  if (!pick) throw new Error('Bu anahtar için görsel düzenleme modeli bulunamadı.');
+  AIM = pick.name.replace('models/', '');
+  return AIM;
+}
+async function aiEdit(key, b64, prompt) {
+  const model = await aiModel(key);
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: b64 } }] }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } }) });
+  const j = await r.json();
+  if (!r.ok) { const e = new Error((j.error && j.error.message) || 'hata'); e.code = r.status; throw e; }
+  const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+  const im = parts.find((p) => p.inlineData || p.inline_data);
+  if (!im) throw new Error((parts.find((p) => p.text) || {}).text || 'Görsel üretilemedi.');
+  const d = im.inlineData || im.inline_data;
+  return { mime: d.mimeType || d.mime_type || 'image/png', data: d.data };
+}
+const aiErr = (e) => (e.code === 400 && /key/i.test(e.message) ? 'Anahtar geçersiz görünüyor. Kontrol edip yeniden gir.' : e.code === 403 ? 'Bu anahtarla görsel düzenlemeye izin yok (ya da bölge kısıtı var).' : e.code === 429 ? 'Ücretsiz kota doldu. Biraz bekleyip tekrar dene (kota Google tarafından belirlenir).' : String(e.message || 'Bir sorun oluştu').slice(0, 160));
 function ModStudio({ me, onClose }) {
-  const [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [url, setUrl] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(false);
-  const car = me.car || {};
-  const gen = () => {
-    const parts = MODS.map(([k, o]) => o[sel[k] || 0][1]).filter(Boolean);
-    const prompt = `${car.year || ''} ${car.brand || ''} ${car.model || ''} ${car.vtype === 'moto' ? 'motorcycle' : 'car'}, ${parts.join(', ')}${extra.trim() ? ', ' + extra.trim() : ''}, photorealistic, ultra detailed, 35mm photo`;
-    setErr(false); setBusy(true);
-    setUrl(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&nologo=true&model=flux&seed=${Math.floor(Math.random() * 1e6)}`);
+  const [key, setKey] = useState(null), [kin, setKin] = useState(''), [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [orig, setOrig] = useState(null), [res, setRes] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(''), [after, setAfter] = useState(true);
+  const car = me.car || {}, word = car.vtype === 'moto' ? 'motorcycle' : 'car';
+  useEffect(() => { AsyncStorage.getItem(AIK).then((v) => setKey(v || '')).catch(() => setKey('')); }, []);
+  const saveKey = () => { const k = kin.trim(); if (k.length < 20) return AlertX.alert('Anahtar eksik', 'Google AI Studio anahtarının tamamını yapıştır.'); AIM = null; AsyncStorage.setItem(AIK, k).catch(() => {}); setKey(k); };
+  const pick = async () => {
+    try {
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.6, base64: true });
+      if (r.canceled) return;
+      if (r.assets[0].base64.length > 6e6) return AlertX.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
+      setOrig(r.assets[0].base64); setRes(null); setErr('');
+    } catch { AlertX.alert('Fotoğraf seçilemedi', 'Galeri iznini kontrol et.'); }
   };
-  const share = async () => { try { const f = await FileSystem.downloadAsync(url, FileSystem.cacheDirectory + 'apex-mod.jpg'); await Sharing.shareAsync(f.uri); } catch { AlertX.alert('Paylaşılamadı', 'Görsel indirilemedi.'); } };
+  const run = async () => {
+    const parts = MODS.map(([k, o]) => o[sel[k] || 0][1]).filter(Boolean);
+    if (!orig) return AlertX.alert('Önce fotoğraf seç', `Düzenlenecek ${word === 'car' ? 'araç' : 'motor'} fotoğrafını ekle.`);
+    if (!parts.length && !extra.trim()) return AlertX.alert('Bir değişiklik seç', 'Renk, jant gibi bir seçenek seç ya da ek istek yaz.');
+    setBusy(true); setErr('');
+    try {
+      const prompt = `Edit this photo of a ${word}. Keep the same ${word}, camera angle, framing and number plate; change only what is requested. Apply: ${parts.join(', ')}${extra.trim() ? '. ' + extra.trim() : ''}. Photorealistic, natural lighting and reflections.`;
+      setRes(await aiEdit(key, orig, prompt)); setAfter(true);
+    } catch (e) { setErr(aiErr(e)); }
+    setBusy(false);
+  };
+  const share = async () => { try { const f = FileSystem.cacheDirectory + 'apex-mod.png'; await FileSystem.writeAsStringAsync(f, res.data, { encoding: FileSystem.EncodingType.Base64 }); await Sharing.shareAsync(f); } catch { AlertX.alert('Paylaşılamadı', 'Görsel kaydedilemedi.'); } };
+  const shown = res && after ? `data:${res.mime};base64,${res.data}` : orig ? `data:image/jpeg;base64,${orig}` : null;
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Modifiye (AI)</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
-          <Text style={s.itemSub}>{car.brand} {car.model} {car.year}</Text>
-          {MODS.map(([k, o]) => (<View key={k}><Text style={[s.itemSub, { marginTop: 14 }]}>{k}</Text><Chips opts={o.map(([l], i) => [l, i])} val={sel[k] || 0} onPick={(i) => setSel({ ...sel, [k]: i })} /></View>))}
-          <TextInput style={s.input} value={extra} onChangeText={setExtra} placeholder="Ek istek (ör. mat siyah kaput, neon altı)" placeholderTextColor={C.dim} />
-          <TouchableOpacity style={s.btn} onPress={gen} disabled={busy}><Text style={s.btnText}>{busy ? 'Üretiliyor...' : 'Görselleştir'}</Text></TouchableOpacity>
-          {url && (
-            <View style={{ marginTop: 16 }}>
-              {busy && <ActivityIndicator color={C.accent} style={{ marginBottom: 8 }} />}
-              <Image source={{ uri: url }} style={{ width: '100%', aspectRatio: 4 / 3, borderRadius: 24, backgroundColor: C.card }} onLoadEnd={() => setBusy(false)} onError={() => { setBusy(false); setErr(true); }} />
-              {err && <Text style={s.hint}>Görsel üretilemedi. Ücretsiz servis yoğun olabilir, birkaç saniye bekleyip tekrar dene.</Text>}
-              {!busy && !err && <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={share}><Text style={[s.btnText, { color: C.accent }]}>Paylaş</Text></TouchableOpacity>}
+          {key === null ? <ActivityIndicator color={C.accent} /> : !key ? (
+            <View style={[s.card, { flexBasis: undefined }]}>
+              <Text style={s.itemTitle}>Google AI anahtarı gerekli</Text>
+              <Text style={[s.itemSub, { marginTop: 6 }]}>Fotoğrafını düzenleyen yapay zeka için kendi ücretsiz Google AI Studio anahtarını kullanırsın. Kota sana ait olur, anahtar sadece bu telefonda saklanır.{'\n\n'}1) Aşağıdaki düğmeden siteyi aç{'\n'}2) Google hesabınla gir, "Create API key" de{'\n'}3) Anahtarı kopyalayıp buraya yapıştır</Text>
+              <TouchableOpacity style={[s.btn, { backgroundColor: C.line }]} onPress={() => Linking.openURL('https://aistudio.google.com/apikey')}><Text style={[s.btnText, { color: C.text }]}>Anahtar al</Text></TouchableOpacity>
+              <TextInput style={s.input} value={kin} onChangeText={setKin} placeholder="Anahtarı yapıştır" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} />
+              <TouchableOpacity style={s.btn} onPress={saveKey}><Text style={s.btnText}>Kaydet</Text></TouchableOpacity>
+            </View>
+          ) : (
+            <View>
+              <Text style={s.itemSub}>{car.brand} {car.model} {car.year}</Text>
+              <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 12 }]} onPress={pick}><Text style={[s.btnText, { color: C.accent }]}>{orig ? 'Fotoğrafı değiştir' : 'Fotoğraf seç'}</Text></TouchableOpacity>
+              {shown && <Image source={{ uri: shown }} style={{ width: '100%', aspectRatio: 4 / 3, borderRadius: 24, marginTop: 12, backgroundColor: C.card }} resizeMode="contain" />}
+              {res && <View style={{ alignItems: 'center' }}><Chips opts={[['Önce', false], ['Sonra', true]]} val={after} onPick={setAfter} /></View>}
+              {MODS.map(([k, o]) => (<View key={k}><Text style={[s.itemSub, { marginTop: 14 }]}>{k}</Text><Chips opts={o.map(([l], i) => [l, i])} val={sel[k] || 0} onPick={(i) => setSel({ ...sel, [k]: i })} /></View>))}
+              <TextInput style={s.input} value={extra} onChangeText={setExtra} placeholder="Ek istek (ör. mat siyah kaput, neon altı)" placeholderTextColor={C.dim} />
+              <TouchableOpacity style={s.btn} onPress={run} disabled={busy}><Text style={s.btnText}>{busy ? 'Düzenleniyor...' : 'Düzenle'}</Text></TouchableOpacity>
+              {busy && <ActivityIndicator color={C.accent} style={{ marginTop: 12 }} />}
+              {!!err && <Text style={[s.hint, { color: '#FF6B6B' }]}>{err}</Text>}
+              {res && !busy && <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={share}><Text style={[s.btnText, { color: C.accent }]}>Sonucu paylaş</Text></TouchableOpacity>}
+              <TouchableOpacity onPress={() => { AsyncStorage.removeItem(AIK).catch(() => {}); AIM = null; setKey(''); }}><Text style={[s.hint, { color: C.accent }]}>Anahtarı sil</Text></TouchableOpacity>
+              <Text style={s.hint}>Sonuç yapay zeka yorumudur, birebir gerçek olmayabilir. Ücretsiz kotanın sınırını Google belirler.</Text>
             </View>
           )}
-          <Text style={s.hint}>Ücretsiz AI servisi kullanılır: uygulamada sayı sınırı yok, ama servis art arda isteklerde ~15 sn bekletebilir. Görsel, aracının bir yorumudur; kendi fotoğrafını birebir düzenlemez.</Text>
         </ScrollView>
       </SafeAreaView>
     </Modal>
   );
 }
 
-function SettingsModal({ prefs, setPrefs, onClose }) {
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
@@ -1085,6 +1404,7 @@ function SettingsModal({ prefs, setPrefs, onClose }) {
     } catch { Linking.openURL(rel.url); }
     setSt('new');
   };
+  useEffect(() => { if (autoCheck) check(); }, []);
   const msg = { idle: '', checking: 'Kontrol ediliyor...', latest: 'En son sürümü kullanıyorsun.', err: 'Kontrol edilemedi. İnternetini kontrol et.', norepo: 'Güncelleme adresi tanımlı değil. Derleme dosyasını güncelleyip yeniden derlemen gerekiyor.', busy: 'İndiriliyor, kurulum ekranı açılacak...', new: rel ? `Yeni sürüm hazır (#${rel.n}).` : '' }[st];
   const Box = ({ title, sub, children }) => <View style={[s.card, { marginBottom: 12, flexBasis: undefined }]}><Text style={s.itemTitle}>{title}</Text>{!!sub && <Text style={[s.itemSub, { marginTop: 4 }]}>{sub}</Text>}{children}</View>;
   return (
@@ -1095,6 +1415,7 @@ function SettingsModal({ prefs, setPrefs, onClose }) {
           <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
           <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
           <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+          <Box title="Günlük hatırlatma" sub="Her gün seçtiğin saatte sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlar."><Chips opts={[['Kapalı', 0], ['12:00', 12], ['17:00', 17], ['18:00', 18], ['20:00', 20]]} val={prefs.daily} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
           <Box title="Sunucu" sub="Sıralama, kulüpler ve hikayeler için.">
             {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
             <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
@@ -1191,8 +1512,8 @@ function SceneBg({ w, h, v }) {
     </Svg>
   );
 }
-function RoadCard({ t, W, tpl, photo, scene, gc, dim, names, persp }) {
-  const H = W * 1.25, GW = W * 0.92, GH = W * 1.1, RW = GW * 0.86, RH = GH * 0.4;
+function RoadCard({ t, W, H, tpl, photo, scene, gc, dim, names, persp }) {
+  const GW = 340, GH = 374, RW = GW * 0.86, RH = GH * 0.4, k = Math.min((W * 0.94) / GW, (H * 0.93) / GH);
   const end = new Date(t.start + t.duration * 1000);
   const hm = end.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
   const arrive = `${hm}, ${end.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })}`;
@@ -1207,7 +1528,7 @@ function RoadCard({ t, W, tpl, photo, scene, gc, dim, names, persp }) {
     <>
       {photo ? <Image source={{ uri: photo }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <SceneBg w={W} h={H} v={scene} />}
       <View style={[StyleSheet.absoluteFill, { backgroundColor: `rgba(0,0,0,${[0, 0.25, 0.5][dim]})` }]} />
-      <View style={{ position: 'absolute', left: (W - GW) / 2, bottom: 4, width: GW, height: GH, transform: persp ? [{ perspective: 800 }, { rotateX: '38deg' }] : [] }}>
+      <View style={{ position: 'absolute', left: (W - GW) / 2, top: H - 4 - (GH * k) / 2 - GH / 2, width: GW, height: GH, transform: persp ? [{ perspective: 800 }, { rotateX: '38deg' }, { scale: k }] : [{ scale: k }] }}>
         {P && (
           <View style={{ position: 'absolute', left: (GW - RW) / 2, top: 0, width: RW, height: RH }}>
             <Svg width={RW} height={RH}>
@@ -1263,13 +1584,22 @@ const DEFY = { sigorta: 1, kasko: 1, vize: 2 };
 const addYears = (d, n) => { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; };
 const fmtOut = (d) => `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
 
-function Detail({ t, onBack, onDelete }) {
-  const [sharing, setSharing] = useState(false);
+function Detail({ t, onBack, onDelete, onUpdate }) {
+  const [sharing, setSharing] = useState(false), [sn, setSn] = useState(false);
+  const snap = async () => {
+    if (t.snapped && t.raw) return onUpdate(t.id, { route: t.raw, snapped: false, raw: null });
+    setSn(true);
+    const r = await snapRoute(t.route);
+    setSn(false);
+    if (!r) return AlertX.alert('Yola oturtulamadı', 'İnternet yok ya da bu yol haritada kayıtlı değil (ör. toprak yol). Rota olduğu gibi kaldı.');
+    onUpdate(t.id, { route: r, snapped: true, raw: t.route.filter((_, i) => i % Math.ceil(t.route.length / 400) === 0) });
+  };
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
       <TouchableOpacity onPress={onBack}><Text style={{ color: C.accent, marginBottom: 12 }}>Geri</Text></TouchableOpacity>
       <Text style={s.h1}>{fmtDate(t.start)}</Text>
       {t.route?.length > 1 ? <ReplayBox t={t} /> : <Text style={[s.hint, { marginBottom: 12 }]}>Bu sürüşün rota kaydı, saklama süresi dolduğu için silindi.</Text>}
+      {t.route?.length > 4 && <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 0, marginBottom: 12 }]} onPress={snap} disabled={sn}><Text style={[s.btnText, { color: C.accent }]}>{sn ? 'Yola oturtuluyor...' : t.snapped ? 'Ham rotaya dön' : 'Rotayı yola oturt'}</Text></TouchableOpacity>}
       <SpeedDist route={t.route} />
       <TripStats t={t} />
       <TouchableOpacity style={s.btn} onPress={() => setSharing(true)}><Text style={s.btnText}>Sürüşü paylaş</Text></TouchableOpacity>
@@ -1281,9 +1611,9 @@ function Detail({ t, onBack, onDelete }) {
   );
 }
 
-export default function App() {
+function AppInner() {
   const sysScheme = useColorScheme();
-  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false });
+  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 18 });
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
@@ -1291,6 +1621,7 @@ export default function App() {
   const [pReady, setPReady] = useState(false);
   const [dlg, setDlg] = useState(null);
   Dlg.show = setDlg;
+  const [settingsOpen, setSettingsOpen] = useState(false), [autoUpd, setAutoUpd] = useState(false);
   const [tab, setTab] = useState('drive');
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
@@ -1388,10 +1719,11 @@ export default function App() {
     sub.current?.remove(); sub.current = null;
     onRef.current = false; setOn(false);
     if (pending.current) { setAsk(pending.current); pending.current = null; }
+    finishCurve(R);
     const d = R, duration = (Date.now() - d.t0) / 1000;
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
-    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route };
+    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000) };
     const n = [t, ...trips];
     setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     setTab('profile');
@@ -1415,8 +1747,14 @@ export default function App() {
   useEffect(() => {
     if (!pReady) return;
     const lim = Date.now() - prefs.keepDays * 864e5;
-    if (trips.some((t) => t.route && t.route.length && t.start < lim)) {
-      const n = trips.map((t) => (t.start < lim ? { ...t, route: [], pruned: true } : t));
+    const need = trips.some((t) => (t.route && t.route.length && t.start < lim) || (t.route && t.route.length > 8 && t.turnsV !== 2) || t.still == null);
+    if (need) {
+      const n = trips.map((t) => {
+        let x = t;
+        if (x.route && x.route.length > 8 && x.turnsV !== 2) { const r = turnsFromRoute(x.route); x = { ...x, left: r.left, right: r.right, turnsV: 2 }; }
+        if (x.still == null) x = { ...x, still: x.avg > 0 ? Math.max(0, x.duration - (x.dist / x.avg) * 3600) : 0 };
+        return x.start < lim && x.route && x.route.length ? { ...x, route: [], pruned: true } : x;
+      });
       setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     }
   }, [trips, prefs.keepDays, pReady]);
@@ -1446,6 +1784,26 @@ export default function App() {
     const id = setTimeout(() => scheduleReminders(vdocs, rem), 800);
     return () => clearTimeout(id);
   }, [vdocs, rem]);
+  useEffect(() => { if (pReady) scheduleDaily(prefs, trips); }, [pReady, prefs.daily, trips.length]);
+  useEffect(() => {
+    if (!pReady) return;
+    notifyUpdate();
+    BackgroundTask.registerTaskAsync(UPD_TASK, { minimumInterval: 360 }).catch(() => {});
+  }, [pReady]);
+  useEffect(() => {
+    const go = async (r) => {
+      if (!r) return;
+      const id = r.notification.request.identifier + ':' + r.notification.date;
+      if ((await AsyncStorage.getItem('@apexdrive_resp')) === id) return;
+      await AsyncStorage.setItem('@apexdrive_resp', id);
+      const to = r.notification.request.content.data && r.notification.request.content.data.to;
+      if (to === 'update') { setAutoUpd(true); setSettingsOpen(true); } else if (to === 'drive') setTab('drive');
+    };
+    Notifications.getLastNotificationResponseAsync().then(go).catch(() => {});
+    const sub = Notifications.addNotificationResponseReceivedListener((r) => { go(r).catch(() => {}); });
+    return () => sub.remove();
+  }, []);
+  const updateTrip = (id, patch) => setTrips((p) => { const n = p.map((t) => (t.id === id ? { ...t, ...patch } : t)); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); return n; });
   const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); };
 
   ME.car = profile && profile.car ? `${profile.car.brand} ${profile.car.model}` : '';
@@ -1466,7 +1824,7 @@ export default function App() {
           {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={vdocs} setDocs={setVdocs} rem={rem} setRem={setRem} />}
-          {tab === 'profile' && <Profile me={profile} trips={trips} terr={cellStore.length} prefs={prefs} setPrefs={setPrefs} onAvatar={pickAvatar} onDelete={del} />}
+          {tab === 'profile' && <Profile me={profile} trips={trips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
         <View style={s.navWrap} pointerEvents="box-none">
           <View style={s.pill}>
@@ -1498,6 +1856,7 @@ export default function App() {
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'mod' && <ModStudio me={profile} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
@@ -1511,6 +1870,16 @@ export default function App() {
         </Modal>
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+export default function App() {
+  const [intro, setIntro] = useState(true);
+  return (
+    <View style={{ flex: 1, backgroundColor: '#0B2B4A' }}>
+      <AppInner />
+      {intro && <Intro onDone={() => setIntro(false)} />}
+    </View>
   );
 }
 
@@ -1617,5 +1986,13 @@ const mk = () => StyleSheet.create({
   rcGauge: { width: 58, height: 58, borderRadius: 29, borderWidth: 3, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0006' },
   rcPill: { borderRadius: 14, padding: 12, backgroundColor: '#0006' },
   rcTile: { borderWidth: 1.5, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#0006' },
+  edTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 6 },
+  edOk: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.accent, borderRadius: 22, paddingVertical: 9, paddingHorizontal: 16 },
+  edTools: { position: 'absolute', right: 8, top: 8, gap: 10 },
+  edBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#000A', alignItems: 'center', justifyContent: 'center' },
+  edTxt: { fontSize: 28, fontWeight: '800', textShadowColor: '#000A', textShadowRadius: 6, textShadowOffset: { width: 0, height: 1 } },
+  edPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#000B', borderRadius: 16, padding: 8 },
+  edPT: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  edPA: { color: '#ccc', fontSize: 12 },
 });
 s = mk();
