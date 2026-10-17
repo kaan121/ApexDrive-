@@ -19,6 +19,7 @@
 ​• Fotoğraf & Hikaye Konumlandırma: Harita üzerinde belirli noktalara araç fotoğrafları ve sürüş hikayeleri (Stories) sabitleyin.
 
 ​📊 2. Detaylı Sürüş Telemetrisi & Replay
+
 • ​Anlık & Geçmiş Sürüş Analizi: Mesafe, toplam süre, durma süresi, ortalama ve maksimum hız takibi.
 
 • ​G-Kuvveti ve İvme Ölçümü: Tepe G-Kuvveti (G), maksimum ivme (m/s^2) ve maksimum yavaşlama (m/s^2) verileri.
