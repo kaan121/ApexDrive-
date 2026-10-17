@@ -6,6 +6,9 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import * as SplashScreen from 'expo-splash-screen';
 import * as BackgroundTask from 'expo-background-task';
 import { Audio } from 'expo-av';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as CFG from './config';
 import { GH_REPO, BUILD } from './repo';
 import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, useColorScheme } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -837,10 +840,18 @@ async function scheduleDaily(prefs, trips) {
     if (!perm.granted) return;
     if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('default', { name: 'Hatırlatmalar', importance: Notifications.AndroidImportance.HIGH });
     const drove = trips.some((t) => new Date(t.start).toDateString() === new Date().toDateString());
-    for (let i = 0; i < 14; i++) {
-      const d = new Date(); d.setDate(d.getDate() + i); d.setHours(prefs.daily, 0, 0, 0);
-      if (d.getTime() <= Date.now() || (i === 0 && drove)) continue;
-      await Notifications.scheduleNotificationAsync({ identifier: `gas-${i}`, content: { title: 'ApexDrive', body: GAS[d.getDate() % GAS.length], data: { to: 'drive' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: d } });
+    const WIN = [[10, 13], [13.5, 17], [17.5, 21.5]];
+    for (let i = 0; i < 5; i++) {
+      const day = new Date(); day.setDate(day.getDate() + i);
+      if (i === 0 && drove) continue;
+      let seed = day.getFullYear() * 400 + day.getMonth() * 32 + day.getDate();
+      const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+      for (let k = 0; k < 3; k++) {
+        const h = WIN[k][0] + rnd() * (WIN[k][1] - WIN[k][0]), d = new Date(day);
+        d.setHours(Math.floor(h), Math.floor((h % 1) * 60), 0, 0);
+        if (d.getTime() <= Date.now()) continue;
+        await Notifications.scheduleNotificationAsync({ identifier: `gas-${i}-${k}`, content: { title: 'ApexDrive', body: GAS[(day.getDate() + k) % GAS.length], data: { to: 'drive' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: d } });
+      }
     }
   } catch {}
 }
@@ -932,15 +943,13 @@ function ReplayBox({ t }) {
 
 function PersonSheet({ u, onClose }) {
   const [pr, setPr] = useState(null), [st, setSt] = useState([]), [big, setBig] = useState(null);
-  const bm = (() => { try { return big && big.music ? JSON.parse(big.music) : null; } catch { return null; } })();
+  const ub = big ? unpackCap(big.caption) : null, bm = ub ? ub.music : null;
   useEffect(() => { if (bm) playClip(bm.url, bm.start); return () => { stopClip(); }; }, [big]);
   useEffect(() => {
     (async () => {
       try {
         setPr((await (await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year`)).json())[0] || { username: u });
         setSt(await (await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at`)).json());
-        const rs = await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at,music`);
-        if (rs.ok) setSt(await rs.json());
       } catch {}
     })();
   }, [u]);
@@ -957,7 +966,7 @@ function PersonSheet({ u, onClose }) {
             <Text style={s.sec}>Hikayeler (24 saat)</Text>
             <ScrollView horizontal>
               {(!Array.isArray(st) || st.length === 0) && <Text style={s.hint}>Aktif hikaye yok.</Text>}
-              {Array.isArray(st) && st.map((x) => <TouchableOpacity key={x.id} onPress={() => setBig(x)}><Image source={{ uri: x.img }} style={s.sthumb} /></TouchableOpacity>)}
+              {Array.isArray(st) && st.map((x) => <TouchableOpacity key={x.id} onPress={() => setBig(x)}><Image source={{ uri: x.img }} style={s.sthumb} />{unpackCap(x.caption).music ? <Text style={s.sbadge}>♫</Text> : null}</TouchableOpacity>)}
             </ScrollView>
             <TouchableOpacity style={[s.btn, { backgroundColor: C.line }]} onPress={onClose}><Text style={[s.btnText, { color: C.text }]}>Kapat</Text></TouchableOpacity>
           </View>
@@ -967,7 +976,7 @@ function PersonSheet({ u, onClose }) {
         <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}>
           <TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}>
             <Image source={{ uri: big.img }} style={{ width: '100%', height: '75%' }} resizeMode="contain" />
-            <Text style={{ color: '#fff', textAlign: 'center', marginTop: 12, fontSize: 16 }}>{big.caption}</Text>
+            <Text style={{ color: '#fff', textAlign: 'center', marginTop: 12, fontSize: 16 }}>{ub.text}</Text>
             {bm && <Text style={{ color: '#ddd', textAlign: 'center', marginTop: 6 }}>♫ {bm.title} — {bm.artist}</Text>}
           </TouchableOpacity>
         </Modal>
@@ -1001,6 +1010,13 @@ function Intro({ onDone }) {
 }
 
 // ---- Müzik (iTunes önizleme) ----
+const MARK = '\u2063\u266B';
+const packCap = (cap, m) => (m ? `${cap}${MARK}${JSON.stringify(m)}` : cap);
+const unpackCap = (c) => {
+  const x = String(c || ''), i = x.indexOf(MARK);
+  if (i < 0) return { text: x, music: null };
+  try { return { text: x.slice(0, i), music: JSON.parse(x.slice(i + MARK.length)) }; } catch { return { text: x.slice(0, i), music: null }; }
+};
 const sfx = { s: null };
 async function stopClip() { try { if (sfx.s) await sfx.s.unloadAsync(); } catch {} sfx.s = null; }
 async function playClip(url, start) {
@@ -1063,23 +1079,44 @@ const MusicPill = ({ m }) => (
     <Ionicons name="musical-notes" size={18} color="#fff" style={{ marginLeft: 8 }} />
   </View>
 );
-function Drag({ children, x0 = 0, y0 = 0 }) {
-  const pos = useRef(new Animated.ValueXY({ x: x0, y: y0 })).current;
+// Çok parmaklı yerleştirme: sürükle, iki parmakla büyüt/küçült/döndür
+function Sticker({ children, x0, y0, onDrag, hit, onDrop }) {
+  const st = useRef({ x: x0, y: y0, s: 1, r: 0 }).current, g = useRef({ lx: 0, ly: 0 }).current, P = useRef({}), [, bump] = useState(0);
+  P.current = { onDrag, hit, onDrop };
+  const cen = (e) => {
+    const t = e.nativeEvent.touches || [], n = t.length;
+    if (!n) return null;
+    let x = 0, y = 0; t.forEach((q) => { x += q.pageX; y += q.pageY; });
+    return { x: x / n, y: y / n, n, d: n > 1 ? Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY) : 0, a: n > 1 ? Math.atan2(t[1].pageY - t[0].pageY, t[1].pageX - t[0].pageX) : 0 };
+  };
+  const base = (c) => { g.n = c.n; g.cx = c.x; g.cy = c.y; g.sx = st.x; g.sy = st.y; g.d = c.d; g.a = c.a; g.s = st.s; g.r = st.r; };
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
-    onPanResponderGrant: () => { pos.setOffset({ x: pos.x._value, y: pos.y._value }); pos.setValue({ x: 0, y: 0 }); },
-    onPanResponderMove: Animated.event([null, { dx: pos.x, dy: pos.y }], { useNativeDriver: false }),
-    onPanResponderRelease: () => pos.flattenOffset(),
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderGrant: (e) => { const c = cen(e); if (c) { base(c); g.lx = c.x; g.ly = c.y; } P.current.onDrag(true, false); },
+    onPanResponderMove: (e) => {
+      const c = cen(e);
+      if (!c) return;
+      if (c.n !== g.n) base(c);
+      st.x = g.sx + (c.x - g.cx); st.y = g.sy + (c.y - g.cy);
+      if (c.n > 1 && g.d > 0) { st.s = Math.max(0.3, Math.min(6, g.s * (c.d / g.d))); st.r = g.r + (c.a - g.a); }
+      g.lx = c.x; g.ly = c.y;
+      P.current.onDrag(true, P.current.hit(c.x, c.y)); bump((v) => v + 1);
+    },
+    onPanResponderRelease: () => { const o = P.current.hit(g.lx, g.ly); P.current.onDrag(false, false); P.current.onDrop(o); },
+    onPanResponderTerminate: () => { P.current.onDrag(false, false); },
   })).current;
-  return <Animated.View {...pan.panHandlers} style={{ position: 'absolute', transform: pos.getTranslateTransform() }}>{children}</Animated.View>;
+  return <View {...pan.panHandlers} style={{ position: 'absolute', left: st.x, top: st.y, padding: 16, transform: [{ rotate: `${st.r}rad` }, { scale: st.s }] }}>{children}</View>;
 }
 const SR = [['9:16', 16 / 9], ['4:5', 1.25], ['1:1', 1]];
 function StoryEditor({ uri, onDone, onCancel }) {
   const { width: SW, height: SH } = Dimensions.get('window');
-  const [ri, setRi] = useState(0), [items, setItems] = useState([]), [txt, setTxt] = useState(null), [mus, setMus] = useState(false), [busy, setBusy] = useState(false);
-  const shot = useRef(null);
+  const [ri, setRi] = useState(0), [items, setItems] = useState([]), [txt, setTxt] = useState(null), [mus, setMus] = useState(false), [busy, setBusy] = useState(false), [drag, setDrag] = useState({ on: false, over: false });
+  const shot = useRef(null), wrap = useRef(null), org = useRef({ x: 0, y: 0 });
   const ch = Math.min((SW - 32) * SR[ri][1], SH * 0.64), cw = ch / SR[ri][1];
   const add = (it) => setItems((p) => [...p, { id: Date.now() + Math.random(), ...it }]);
+  const hit = (cx, cy) => Math.hypot(cx - (org.current.x + cw / 2), cy - (org.current.y + ch - 44)) < 56;
   const done = async () => {
     setBusy(true);
     try {
@@ -1097,13 +1134,13 @@ function StoryEditor({ uri, onDone, onCancel }) {
           <TouchableOpacity style={s.edOk} onPress={done} disabled={busy}><Ionicons name="checkmark" size={20} color="#06101F" /><Text style={s.btnText}>{busy ? '...' : 'Tamam'}</Text></TouchableOpacity>
         </View>
         <View style={{ alignItems: 'center' }}>
-          <View style={{ width: cw, height: ch }}>
+          <View ref={wrap} onLayout={() => wrap.current && wrap.current.measureInWindow((x, y) => { org.current = { x, y }; })} style={{ width: cw, height: ch }}>
             <View ref={shot} collapsable={false} style={{ width: cw, height: ch, borderRadius: 18, overflow: 'hidden', backgroundColor: '#000' }}>
               <Image source={{ uri }} style={{ width: cw, height: ch }} resizeMode="cover" />
               {items.map((it) => (
-                <Drag key={it.id} x0={cw * 0.12} y0={ch * (it.kind === 'music' ? 0.7 : 0.4)}>
+                <Sticker key={it.id} x0={cw * 0.12} y0={ch * (it.kind === 'music' ? 0.7 : 0.4)} onDrag={(a, o) => setDrag({ on: a, over: o })} hit={hit} onDrop={(o) => { if (o) setItems((p) => p.filter((x) => x.id !== it.id)); }}>
                   {it.kind === 'text' ? <Text style={[s.edTxt, { color: it.c }]}>{it.t}</Text> : <MusicPill m={it.m} />}
-                </Drag>
+                </Sticker>
               ))}
             </View>
             <View style={s.edTools}>
@@ -1111,10 +1148,11 @@ function StoryEditor({ uri, onDone, onCancel }) {
               <TouchableOpacity style={s.edBtn} onPress={() => setMus(true)}><Ionicons name="musical-notes" size={22} color="#fff" /></TouchableOpacity>
               <TouchableOpacity style={s.edBtn} onPress={() => setItems((p) => p.slice(0, -1))}><Ionicons name="arrow-undo" size={22} color="#fff" /></TouchableOpacity>
             </View>
+            {drag.on && <View style={[s.edTrash, drag.over && { backgroundColor: '#FF453A' }]}><Ionicons name="trash" size={26} color="#fff" /></View>}
           </View>
         </View>
         <View style={{ alignItems: 'center', marginTop: 12 }}><Chips opts={SR.map(([l], i) => [l, i])} val={ri} onPick={setRi} /></View>
-        <Text style={[s.hint, { marginTop: 8 }]}>Yazıyı ve müzik etiketini sürükleyerek yerleştir.</Text>
+        <Text style={[s.hint, { marginTop: 8 }]}>Sürükle, iki parmakla büyüt/küçült/döndür. Silmek için alttaki çöp kutusuna bırak.</Text>
         {txt && (
           <Modal visible transparent animationType="fade" onRequestClose={() => setTxt(null)}>
             <View style={s.modalBg}>
@@ -1147,9 +1185,8 @@ function StoryComposer({ me, pos, onClose }) {
     setBusy(true);
     try {
       await api('stories?created_at=lt.' + new Date(Date.now() - 864e5).toISOString(), { method: 'DELETE' });
-      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: cap.trim(), img };
-      let r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(music ? { ...row, music: JSON.stringify(music) } : row) });
-      if (!r.ok && music) r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(row) });
+      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: packCap(cap.trim(), music), img };
+      const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(row) });
       if (!r.ok) throw 0;
       onClose();
     } catch { AlertX.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
@@ -1174,63 +1211,307 @@ function StoryComposer({ me, pos, onClose }) {
   );
 }
 
-function ClubView({ club, me, onBack }) {
-  const [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [txt, setTxt] = useState('');
-  const isM = mem.some((m) => m.username === me.username);
-  const load = async () => {
+// ---- Kulüp yardımcıları ----
+async function shrink(uri, w, png) {
+  try {
+    const r = await ImageManipulator.manipulateAsync(uri, [{ resize: { width: w } }], { compress: 0.6, format: png ? ImageManipulator.SaveFormat.PNG : ImageManipulator.SaveFormat.JPEG, base64: true });
+    return `data:image/${png ? 'png' : 'jpeg'};base64,${r.base64}`;
+  } catch { return null; }
+}
+const mcache = new Map();
+async function loadMedia(id) {
+  if (mcache.has(id)) return mcache.get(id);
+  const j = await (await api(`club_posts?id=eq.${id}&select=media`)).json();
+  const m = j[0] && j[0].media;
+  if (m) mcache.set(id, m);
+  return m;
+}
+async function openClubFile(p) {
+  try {
+    const m = JSON.parse(p.meta || '{}'), b = await loadMedia(p.id);
+    const f = FileSystem.cacheDirectory + String(m.name || 'dosya').replace(/[^\w.\-]/g, '_');
+    await FileSystem.writeAsStringAsync(f, b, { encoding: FileSystem.EncodingType.Base64 });
+    await Sharing.shareAsync(f, { mimeType: m.mime });
+  } catch { AlertX.alert('Dosya açılamadı', 'Tekrar dene.'); }
+}
+const fileMeta = (p) => { try { return JSON.parse(p.meta || '{}'); } catch { return {}; } };
+const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+function MediaImg({ id, style, contain, onPress }) {
+  const [u, setU] = useState(mcache.get(id) || null);
+  useEffect(() => { if (!u) loadMedia(id).then(setU).catch(() => {}); }, [id]);
+  const img = u ? <Image source={{ uri: u }} style={style} resizeMode={contain ? 'contain' : 'cover'} /> : <View style={[style, { backgroundColor: C.line, alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={C.accent} /></View>;
+  return onPress ? <TouchableOpacity onPress={() => onPress(u)}>{img}</TouchableOpacity> : img;
+}
+function Linkify({ text, style }) {
+  const parts = String(text || '').split(/(https?:\/\/[^\s]+)/g);
+  return <Text style={style}>{parts.map((p, i) => (/^https?:\/\//.test(p) ? <Text key={i} style={{ color: C.accent, textDecorationLine: 'underline' }} onPress={() => Linking.openURL(p).catch(() => {})}>{p}</Text> : p))}</Text>;
+}
+function Av({ club, size = 40 }) {
+  return club.photo
+    ? <Image source={{ uri: club.photo }} style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: C.line }} />
+    : <View style={[s.pAv, { width: size, height: size, borderRadius: size / 2, marginVertical: 0 }]}><Text style={s.pLetter}>{String(club.name || '?')[0].toUpperCase()}</Text></View>;
+}
+const EMO = ['🏁', '🔥', '🚗', '🏍️', '💨', '⚡', '🛞', '🏆', '😎', '🤘', '👍', '😂', '❤️', '🛣️', '⛽', '🔧'];
+function StickerSheet({ onPick, onClose }) {
+  const [mine, setMine] = useState([]);
+  useEffect(() => { AsyncStorage.getItem('@apexdrive_stickers').then((v) => v && setMine(JSON.parse(v))).catch(() => {}); }, []);
+  const save = (n) => { setMine(n); AsyncStorage.setItem('@apexdrive_stickers', JSON.stringify(n)).catch(() => {}); };
+  const add = async () => {
     try {
-      const names = (await (await api(`club_members?club_id=eq.${club.id}&select=username`)).json()).map((m) => m.username);
-      const pr = names.length ? await (await api(`profiles?username=in.(${names.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`)).json() : [];
-      setMem(names.map((u) => ({ username: u, ...(pr.find((p) => p.username === u) || {}) })).sort((a, b) => (b.total_km || 0) - (a.total_km || 0)));
-      setPosts(await (await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=50&select=username,body,created_at`)).json());
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
+      if (r.canceled) return;
+      const d = await shrink(r.assets[0].uri, 256, true);
+      if (!d) return AlertX.alert('Çıkartma hazırlanamadı', 'Başka bir görsel dene.');
+      save([d, ...mine].slice(0, 30));
     } catch {}
   };
-  useEffect(() => { load(); }, []);
-  const toggle = async () => {
-    try {
-      if (isM) await api(`club_members?club_id=eq.${club.id}&username=eq.${me.username}`, { method: 'DELETE' });
-      else await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username }) });
-      load();
-    } catch {}
-  };
-  const post = async () => {
-    if (!txt.trim()) return;
-    try { await api('club_posts', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username, body: txt.trim() }) }); setTxt(''); load(); } catch {}
-  };
+  const del = (d) => AlertX.alert('Çıkartma silinsin mi?', '', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => save(mine.filter((x) => x !== d)) }]);
   return (
-    <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
-      <TouchableOpacity onPress={onBack}><Text style={{ color: C.accent, marginBottom: 10 }}>Geri</Text></TouchableOpacity>
-      <Text style={s.title}>{club.name}</Text>
-      {!!club.about && <Text style={[s.itemSub, { marginBottom: 12 }]}>{club.about}</Text>}
-      <TouchableOpacity style={[s.btn, { marginTop: 0 }, isM && { backgroundColor: C.card }]} onPress={toggle}><Text style={[s.btnText, isM && { color: '#FF6B6B' }]}>{isM ? 'Kulüpten ayrıl' : 'Kulübe katıl'}</Text></TouchableOpacity>
-      <Text style={s.sec}>Üyeler ({mem.length})</Text>
-      {mem.slice(0, 10).map((m, i) => (
-        <View key={m.username} style={[s.item, { flexDirection: 'row', alignItems: 'center' }]}>
-          <Text style={s.rank}>{i + 1}</Text>
-          <View style={{ flex: 1 }}><Text style={s.itemTitle}>{m.username}</Text><Text style={s.itemSub}>{m.car_brand ? `${m.car_brand} ${m.car_model}` : ''}</Text></View>
-          <Text style={s.itemTitle}>{(m.total_km || 0).toFixed(0)} km</Text>
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, maxHeight: '70%' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.sec}>Çıkartmalar</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <ScrollView>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>{EMO.map((e) => <TouchableOpacity key={e} style={s.stkCell} onPress={() => onPick({ kind: 'sticker', body: e })}><Text style={{ fontSize: 34 }}>{e}</Text></TouchableOpacity>)}</View>
+            <Text style={[s.itemSub, { marginTop: 16, marginBottom: 8 }]}>Çıkartmalarım (uzun basarak silebilirsin)</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+              <TouchableOpacity style={[s.stkCell, { backgroundColor: C.card }]} onPress={add}><Ionicons name="add" size={30} color={C.accent} /></TouchableOpacity>
+              {mine.map((d) => <TouchableOpacity key={d.slice(-40)} style={s.stkCell} onPress={() => onPick({ kind: 'sticker', body: '', media: d, meta: 'img' })} onLongPress={() => del(d)}><Image source={{ uri: d }} style={{ width: 56, height: 56 }} resizeMode="contain" /></TouchableOpacity>)}
+            </View>
+          </ScrollView>
         </View>
-      ))}
-      <Text style={s.sec}>Kulüp alanı</Text>
-      {isM ? (
-        <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
-          <TextInput style={[s.input, { flex: 1, marginTop: 0 }]} value={txt} onChangeText={setTxt} placeholder="Kulübe bir şey yaz" placeholderTextColor={C.dim} maxLength={300} />
-          <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={post}><Ionicons name="send" size={18} color="#06101F" /></TouchableOpacity>
-        </View>
-      ) : <Text style={s.hint}>Paylaşım yapmak için kulübe katıl.</Text>}
-      {Array.isArray(posts) && posts.map((p, i) => (
-        <View key={i} style={s.item}><Text style={s.itemTitle}>{p.username}</Text><Text style={[s.itemSub, { color: C.text }]}>{p.body}</Text><Text style={s.itemSub}>{fmtDate(p.created_at)}</Text></View>
-      ))}
-    </ScrollView>
+      </View>
+    </Modal>
   );
 }
-
+function ClubMedia({ club, onClose }) {
+  const [tab, setTab] = useState('image'), [rows, setRows] = useState([]), [big, setBig] = useState(null), [err, setErr] = useState(false);
+  useEffect(() => {
+    (async () => {
+      setRows([]); setErr(false);
+      try {
+        const base = `club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=80`;
+        const r = tab === 'link' ? await api(`${base}&body=ilike.*http*&select=id,username,body,created_at`) : await api(`${base}&kind=eq.${tab}&select=id,username,created_at,meta`);
+        const j = await r.json();
+        if (!r.ok || !Array.isArray(j)) throw 0;
+        setRows(tab === 'link' ? j.flatMap((p) => (String(p.body).match(/https?:\/\/[^\s]+/g) || []).map((u, i) => ({ id: p.id + '-' + i, url: u, username: p.username, created_at: p.created_at }))) : j);
+      } catch { setErr(true); }
+    })();
+  }, [tab]);
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Medya</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <Chips opts={[['Fotoğraflar', 'image'], ['Dosyalar', 'file'], ['Linkler', 'link']]} val={tab} onPick={setTab} />
+          {err && <Text style={s.hint}>Yüklenemedi. Sunucu güncellemesi (SQL) gerekiyor olabilir.</Text>}
+          {!err && rows.length === 0 && <Text style={s.hint}>Burada henüz bir şey yok.</Text>}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 14 }}>
+            {tab === 'image' && rows.map((p) => <MediaImg key={p.id} id={p.id} style={{ width: '32%', aspectRatio: 1, borderRadius: 12 }} onPress={(u) => u && setBig(u)} />)}
+          </View>
+          {tab === 'file' && rows.map((p) => (
+            <TouchableOpacity key={p.id} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => openClubFile(p)}>
+              <Ionicons name="document-text" size={28} color={C.accent} />
+              <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{fileMeta(p).name || 'Dosya'}</Text><Text style={s.itemSub}>{p.username} · {fmtSize(fileMeta(p).size || 0)}</Text></View>
+            </TouchableOpacity>
+          ))}
+          {tab === 'link' && rows.map((p) => (
+            <TouchableOpacity key={p.id} style={s.item} onPress={() => Linking.openURL(p.url).catch(() => {})}>
+              <Text style={[s.itemTitle, { color: C.accent }]} numberOfLines={2}>{p.url}</Text><Text style={s.itemSub}>{p.username} · {fmtDate(p.created_at)}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+        {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
+  const [sel, setSel] = useState(null), [media, setMedia] = useState(false), [nm, setNm] = useState(club.name), [ab, setAb] = useState(club.about || '');
+  const isOwner = club.owner === me.username, mine = mem.find((m) => m.username === me.username), isAdmin = !!mine && mine.role === 'admin', isM = !!mine || isOwner;
+  const can = (m) => m.username !== me.username && m.username !== club.owner && (isOwner || (isAdmin && m.role !== 'admin'));
+  const names = (a) => a.map(encodeURIComponent).join(',');
+  const patchClub = async (patch) => {
+    try {
+      const r = await api(`clubs?id=eq.${club.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+      if (r.status === 409) return AlertX.alert('Bu kulüp adı alınmış', 'Başka bir ad dene.');
+      if (!r.ok) return AlertX.alert('Kaydedilemedi', patch.photo !== undefined ? 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.' : 'Tekrar dene.');
+      setClub({ ...club, ...patch });
+    } catch { AlertX.alert('Kaydedilemedi', 'Bağlantını kontrol et.'); }
+  };
+  const pickPhoto = async () => {
+    try {
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
+      if (r.canceled) return;
+      const d = await shrink(r.assets[0].uri, 320);
+      if (d) patchClub({ photo: d }); else AlertX.alert('Fotoğraf hazırlanamadı', 'Başka bir fotoğraf dene.');
+    } catch {}
+  };
+  const roleOp = async (list, role) => {
+    try {
+      const r = await api(`club_members?club_id=eq.${club.id}&username=in.(${names(list)})`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ role }) });
+      if (!r.ok) AlertX.alert('İşlem yapılamadı', 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.');
+    } catch {}
+    setSel(null); onChanged();
+  };
+  const kick = (list) => AlertX.alert('Kulüpten çıkarılsın mı?', list.length > 1 ? `${list.length} üye çıkarılacak.` : list[0], [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkar', style: 'destructive', onPress: async () => { try { await api(`club_members?club_id=eq.${club.id}&username=in.(${names(list)})`, { method: 'DELETE' }); } catch {} setSel(null); onChanged(); } }]);
+  const manage = (m) => AlertX.alert(m.username, m.role === 'admin' ? 'Yönetici' : 'Üye', [
+    ...(isOwner ? [m.role === 'admin' ? { text: 'Yöneticiliği kaldır', onPress: () => roleOp([m.username], 'member') } : { text: 'Yönetici yap', onPress: () => roleOp([m.username], 'admin') }] : []),
+    { text: 'Kulüpten çıkar', style: 'destructive', onPress: () => kick([m.username]) },
+    { text: 'Vazgeç', style: 'cancel' },
+  ]);
+  const leave = () => AlertX.alert('Kulüpten ayrılmak istiyor musun?', club.name, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Ayrıl', style: 'destructive', onPress: async () => { try { await api(`club_members?club_id=eq.${club.id}&username=eq.${me.username}`, { method: 'DELETE' }); } catch {} onLeft(); } }]);
+  const del = () => AlertX.alert('Kulüp silinsin mi?', 'Tüm mesajlar ve üyelikler silinir. Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: async () => { try { await api(`clubs?id=eq.${club.id}`, { method: 'DELETE' }); } catch {} onLeft(); } }]);
+  const toggle = (u) => setSel((p) => (p.includes(u) ? p.filter((x) => x !== u) : [...p, u]));
+  const chosen = sel || [];
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.title}>Kulüp ayarları</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <View style={{ alignItems: 'center', marginBottom: 14 }}>
+            <TouchableOpacity disabled={!(isOwner || isAdmin)} onPress={pickPhoto}>
+              <Av club={club} size={96} />
+              {(isOwner || isAdmin) && <View style={s.camBadge}><Ionicons name="camera" size={16} color="#06101F" /></View>}
+            </TouchableOpacity>
+            {isOwner ? (
+              <View style={{ width: '100%' }}>
+                <TextInput style={[s.input, { textAlign: 'center', fontWeight: '800' }]} value={nm} onChangeText={setNm} maxLength={40} />
+                <TextInput style={s.input} value={ab} onChangeText={setAb} placeholder="Kısa açıklama" placeholderTextColor={C.dim} maxLength={140} />
+                {(nm.trim() !== club.name || ab.trim() !== (club.about || '')) && nm.trim().length >= 3 && <TouchableOpacity style={s.btn} onPress={() => patchClub({ name: nm.trim(), about: ab.trim() })}><Text style={s.btnText}>Kaydet</Text></TouchableOpacity>}
+              </View>
+            ) : (<View style={{ alignItems: 'center' }}><Text style={[s.name, { marginTop: 10 }]}>{club.name}</Text>{!!club.about && <Text style={s.itemSub}>{club.about}</Text>}</View>)}
+          </View>
+          <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => setMedia(true)}>
+            <Ionicons name="images" size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Medya, dosya ve linkler</Text><Ionicons name="chevron-forward" size={20} color={C.dim} />
+          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text style={s.sec}>Üyeler ({mem.length})</Text>
+            {(isOwner || isAdmin) && <TouchableOpacity onPress={() => setSel(sel ? null : [])}><Text style={{ color: C.accent, fontWeight: '700' }}>{sel ? 'Bitti' : 'Seç'}</Text></TouchableOpacity>}
+          </View>
+          {mem.map((m) => (
+            <View key={m.username} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 10 }]}>
+              {sel && <TouchableOpacity disabled={!can(m)} onPress={() => toggle(m.username)} style={[s.chk, chosen.includes(m.username) && { backgroundColor: C.accent, borderColor: C.accent }, !can(m) && { opacity: 0.25 }]}>{chosen.includes(m.username) && <Ionicons name="checkmark" size={16} color="#06101F" />}</TouchableOpacity>}
+              <View style={[s.pAv, { width: 40, height: 40, borderRadius: 20, marginVertical: 0 }]}><Text style={s.pLetter}>{m.username[0].toUpperCase()}</Text></View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.itemTitle}>{m.username}{m.username === club.owner ? '  👑' : m.role === 'admin' ? '  ★' : ''}</Text>
+                <Text style={s.itemSub}>{m.username === club.owner ? 'Kurucu' : m.role === 'admin' ? 'Yönetici' : m.car_brand ? `${m.car_brand} ${m.car_model}` : 'Üye'}</Text>
+              </View>
+              {can(m) && !sel && <TouchableOpacity onPress={() => manage(m)} style={{ padding: 6 }}><Ionicons name="ellipsis-horizontal" size={22} color={C.text} /></TouchableOpacity>}
+            </View>
+          ))}
+          {sel && chosen.length > 0 && (
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
+              {isOwner && <TouchableOpacity style={[s.btn, { flex: 1, marginTop: 0 }]} onPress={() => roleOp(chosen, 'admin')}><Text style={s.btnText}>Yönetici yap</Text></TouchableOpacity>}
+              <TouchableOpacity style={[s.btn, { flex: 1, marginTop: 0, backgroundColor: '#FF453A22' }]} onPress={() => kick(chosen)}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Çıkar ({chosen.length})</Text></TouchableOpacity>
+            </View>
+          )}
+          {isM && !isOwner && <TouchableOpacity style={[s.btn, { backgroundColor: '#FF453A22' }]} onPress={leave}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Kulüpten ayrıl</Text></TouchableOpacity>}
+          {isOwner && <TouchableOpacity style={[s.btn, { backgroundColor: '#FF453A22' }]} onPress={del}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Kulübü sil</Text></TouchableOpacity>}
+        </ScrollView>
+        {media && <ClubMedia club={club} onClose={() => setMedia(false)} />}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+function ClubView({ club: club0, me, onBack }) {
+  const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [txt, setTxt] = useState(''), [stk, setStk] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null);
+  const isM = mem.some((m) => m.username === me.username) || club.owner === me.username;
+  const load = async () => {
+    try {
+      let r = await api(`club_members?club_id=eq.${club.id}&select=username,role`);
+      if (!r.ok) r = await api(`club_members?club_id=eq.${club.id}&select=username`);
+      const ms = await r.json(), ns = Array.isArray(ms) ? ms.map((m) => m.username) : [];
+      const pr = ns.length ? await (await api(`profiles?username=in.(${ns.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`)).json() : [];
+      setMem(ns.length ? ms.map((m) => ({ ...m, ...((Array.isArray(pr) ? pr : []).find((p) => p.username === m.username) || {}) })).sort((a, b) => (b.total_km || 0) - (a.total_km || 0)) : []);
+      let q = await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=60&select=id,username,body,created_at,kind,meta`);
+      if (!q.ok) q = await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=60&select=id,username,body,created_at`);
+      const pj = await q.json(); setPosts(Array.isArray(pj) ? pj : []);
+    } catch {}
+  };
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, []);
+  const send = async (row) => {
+    const plain = !row.kind || row.kind === 'text';
+    try {
+      const r = await api('club_posts', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ club_id: club.id, username: me.username, body: row.body || '', ...(plain ? {} : { kind: row.kind, media: row.media, meta: row.meta }) }) });
+      if (!r.ok) AlertX.alert('Gönderilemedi', plain ? 'Bağlantını kontrol et.' : 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.');
+      else load();
+    } catch { AlertX.alert('Gönderilemedi', 'Bağlantını kontrol et.'); }
+  };
+  const sendText = () => { if (txt.trim()) { send({ body: txt.trim() }); setTxt(''); } };
+  const sendPhoto = async () => {
+    try {
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
+      if (r.canceled) return;
+      const d = await shrink(r.assets[0].uri, 1000);
+      if (!d || d.length > 1.4e6) return AlertX.alert('Fotoğraf gönderilemedi', 'Fotoğraf hazırlanamadı ya da çok büyük.');
+      send({ kind: 'image', media: d });
+    } catch {}
+  };
+  const sendFile = async () => {
+    try {
+      const r = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
+      if (r.canceled) return;
+      const a = r.assets[0];
+      if ((a.size || 0) > 1.2e6) return AlertX.alert('Dosya çok büyük', 'En fazla 1,2 MB gönderebilirsin.');
+      const b = await FileSystem.readAsStringAsync(a.uri, { encoding: FileSystem.EncodingType.Base64 });
+      send({ kind: 'file', media: b, meta: JSON.stringify({ name: a.name, size: a.size, mime: a.mimeType }) });
+    } catch { AlertX.alert('Dosya gönderilemedi', 'Tekrar dene.'); }
+  };
+  const attach = () => AlertX.alert('Ekle', 'Ne göndermek istersin?', [{ text: 'Fotoğraf', onPress: sendPhoto }, { text: 'Dosya', onPress: sendFile }, { text: 'Vazgeç', style: 'cancel' }]);
+  const join = async () => { try { await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username }) }); load(); } catch {} };
+  const Bub = ({ p }) => {
+    const mine = p.username === me.username, k = p.kind || 'text';
+    const body = k === 'image' ? <MediaImg id={p.id} style={{ width: 220, height: 220, borderRadius: 14 }} onPress={(u) => u && setBig(u)} />
+      : k === 'sticker' ? (p.meta === 'img' ? <MediaImg id={p.id} contain style={{ width: 120, height: 120 }} /> : <Text style={{ fontSize: 56 }}>{p.body}</Text>)
+      : k === 'file' ? (
+        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => openClubFile(p)}>
+          <Ionicons name="document-text" size={28} color={C.accent} />
+          <View style={{ maxWidth: 180 }}><Text style={s.itemTitle} numberOfLines={1}>{fileMeta(p).name || 'Dosya'}</Text><Text style={s.itemSub}>{fmtSize(fileMeta(p).size || 0)}</Text></View>
+        </TouchableOpacity>
+      ) : <Linkify text={p.body} style={{ color: C.text, fontSize: 16 }} />;
+    return (
+      <View style={[s.bub, mine && { alignSelf: 'flex-end', backgroundColor: C.sel }, k === 'sticker' && { backgroundColor: 'transparent', padding: 0 }]}>
+        {!mine && <Text style={[s.itemSub, { color: C.accent, marginBottom: 2 }]}>{p.username}</Text>}
+        {body}
+        <Text style={[s.itemSub, { fontSize: 11, marginTop: 4, textAlign: 'right' }]}>{fmtDate(p.created_at)}</Text>
+      </View>
+    );
+  };
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={s.cvTop}>
+        <TouchableOpacity onPress={onBack}><Ionicons name="chevron-back" size={28} color={C.accent} /></TouchableOpacity>
+        <TouchableOpacity style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => setSet(true)}>
+          <Av club={club} size={40} />
+          <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{club.name}</Text><Text style={s.itemSub}>{mem.length} üye</Text></View>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => setSet(true)} style={{ padding: 6 }}><Ionicons name="settings-outline" size={24} color={C.text} /></TouchableOpacity>
+      </View>
+      {!isM && <TouchableOpacity style={[s.btn, { margin: 14 }]} onPress={join}><Text style={s.btnText}>Kulübe katıl</Text></TouchableOpacity>}
+      <FlatList inverted data={posts} keyExtractor={(p) => String(p.id)} contentContainerStyle={{ padding: 14 }} ListEmptyComponent={<Text style={[s.hint, { transform: [{ scaleY: -1 }] }]}>Henüz mesaj yok.</Text>} renderItem={({ item }) => <Bub p={item} />} />
+      {isM && (
+        <View style={s.cvBar}>
+          <TouchableOpacity onPress={attach} style={s.cvIc}><Ionicons name="attach" size={24} color={C.dim} /></TouchableOpacity>
+          <TextInput style={s.cvIn} value={txt} onChangeText={setTxt} placeholder="Mesaj yaz" placeholderTextColor={C.dim} maxLength={500} multiline />
+          <TouchableOpacity onPress={() => setStk(true)} style={s.cvIc}><Ionicons name="happy-outline" size={24} color={C.dim} /></TouchableOpacity>
+          <TouchableOpacity onPress={sendText} style={[s.cvIc, { backgroundColor: C.accent }]}><Ionicons name="send" size={18} color="#06101F" /></TouchableOpacity>
+        </View>
+      )}
+      {stk && <StickerSheet onClose={() => setStk(false)} onPick={(r) => { setStk(false); send(r); }} />}
+      {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
+      {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
+    </View>
+  );
+}
 function ClubsScreen({ me, onClose }) {
   const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState('');
   const load = async () => {
     if (!online) return;
     try {
-      const c = await (await api('clubs?select=id,name,about,vtype,owner&order=created_at.desc&limit=100')).json();
+      let r = await api('clubs?select=id,name,about,vtype,owner,photo&order=created_at.desc&limit=100');
+      if (!r.ok) r = await api('clubs?select=id,name,about,vtype,owner&order=created_at.desc&limit=100');
+      const c = await r.json();
       setClubs(Array.isArray(c) ? c : []);
       const m = await (await api(`club_members?username=eq.${me.username}&select=club_id`)).json();
       setMine(Array.isArray(m) ? m.map((x) => x.club_id) : []);
@@ -1244,7 +1525,8 @@ function ClubsScreen({ me, onClose }) {
       const r = await api('clubs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: n, about: ab.trim(), vtype: me.car?.vtype || 'car', owner: me.username }) });
       if (r.status === 409) return AlertX.alert('Bu kulüp adı alınmış');
       const [c] = await r.json();
-      await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username }) });
+      let m = await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username, role: 'owner' }) });
+      if (!m.ok) await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username }) });
       setMk(false); setNm(''); setAb(''); load(); setSel(c);
     } catch { AlertX.alert('Kulüp oluşturulamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
   };
@@ -1270,9 +1552,12 @@ function ClubsScreen({ me, onClose }) {
             )}
             {list.length === 0 && <Text style={s.hint}>Henüz kulüp yok. İlkini sen kur.</Text>}
             {list.map((c) => (
-              <TouchableOpacity key={c.id} style={s.item} onPress={() => setSel(c)}>
-                <Text style={s.itemTitle}>{c.name}{mine.includes(c.id) ? '  ✓' : ''}</Text>
-                <Text style={s.itemSub}>{c.vtype === 'moto' ? 'Motor' : 'Araba'}{c.about ? ' · ' + c.about : ''}</Text>
+              <TouchableOpacity key={c.id} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => setSel(c)}>
+                <Av club={c} size={46} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.itemTitle}>{c.name}{mine.includes(c.id) ? '  ✓' : ''}</Text>
+                  <Text style={s.itemSub} numberOfLines={1}>{c.vtype === 'moto' ? 'Motor' : 'Araba'}{c.about ? ' · ' + c.about : ''}</Text>
+                </View>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -1289,6 +1574,7 @@ const MODS = [
   ['Duruş', [['Stok', ''], ['Alçaltılmış', 'lowered stance'], ['Yükseltilmiş', 'lifted off-road stance']]],
   ['Ortam', [['Aynı kalsın', ''], ['Gün batımı yol', 'on a coastal road at sunset'], ['Gece şehir', 'in a neon city at night'], ['Pist', 'on a race track'], ['Stüdyo', 'in a clean photo studio']]],
 ];
+const SHARED = CFG.AI_KEY || '', AI_DAILY = CFG.AI_DAILY || 8, AIU = '@apexdrive_aiuse';
 const AIK = '@apexdrive_aikey';
 let AIM = null;
 async function aiModel(key) {
@@ -1314,9 +1600,12 @@ async function aiEdit(key, b64, prompt) {
 }
 const aiErr = (e) => (e.code === 400 && /key/i.test(e.message) ? 'Anahtar geçersiz görünüyor. Kontrol edip yeniden gir.' : e.code === 403 ? 'Bu anahtarla görsel düzenlemeye izin yok (ya da bölge kısıtı var).' : e.code === 429 ? 'Ücretsiz kota doldu. Biraz bekleyip tekrar dene (kota Google tarafından belirlenir).' : String(e.message || 'Bir sorun oluştu').slice(0, 160));
 function ModStudio({ me, onClose }) {
-  const [key, setKey] = useState(null), [kin, setKin] = useState(''), [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [orig, setOrig] = useState(null), [res, setRes] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(''), [after, setAfter] = useState(true);
+  const [key, setKey] = useState(null), [kin, setKin] = useState(''), [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [orig, setOrig] = useState(null), [res, setRes] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(''), [after, setAfter] = useState(true), [used, setUsed] = useState(0);
   const car = me.car || {}, word = car.vtype === 'moto' ? 'motorcycle' : 'car';
-  useEffect(() => { AsyncStorage.getItem(AIK).then((v) => setKey(v || '')).catch(() => setKey('')); }, []);
+  useEffect(() => {
+    if (SHARED) { setKey(SHARED); AsyncStorage.getItem(AIU).then((v) => { const u = v ? JSON.parse(v) : {}; setUsed(u.d === new Date().toDateString() ? u.n : 0); }).catch(() => {}); return; }
+    AsyncStorage.getItem(AIK).then((v) => setKey(v || '')).catch(() => setKey(''));
+  }, []);
   const saveKey = () => { const k = kin.trim(); if (k.length < 20) return AlertX.alert('Anahtar eksik', 'Google AI Studio anahtarının tamamını yapıştır.'); AIM = null; AsyncStorage.setItem(AIK, k).catch(() => {}); setKey(k); };
   const pick = async () => {
     try {
@@ -1330,10 +1619,12 @@ function ModStudio({ me, onClose }) {
     const parts = MODS.map(([k, o]) => o[sel[k] || 0][1]).filter(Boolean);
     if (!orig) return AlertX.alert('Önce fotoğraf seç', `Düzenlenecek ${word === 'car' ? 'araç' : 'motor'} fotoğrafını ekle.`);
     if (!parts.length && !extra.trim()) return AlertX.alert('Bir değişiklik seç', 'Renk, jant gibi bir seçenek seç ya da ek istek yaz.');
+    if (SHARED && used >= AI_DAILY) return AlertX.alert('Günlük hakkın bitti', 'Bugün için tüm düzenleme haklarını kullandın. Yarın tekrar dene.');
     setBusy(true); setErr('');
     try {
       const prompt = `Edit this photo of a ${word}. Keep the same ${word}, camera angle, framing and number plate; change only what is requested. Apply: ${parts.join(', ')}${extra.trim() ? '. ' + extra.trim() : ''}. Photorealistic, natural lighting and reflections.`;
       setRes(await aiEdit(key, orig, prompt)); setAfter(true);
+      if (SHARED) { const n = used + 1; setUsed(n); AsyncStorage.setItem(AIU, JSON.stringify({ d: new Date().toDateString(), n })).catch(() => {}); }
     } catch (e) { setErr(aiErr(e)); }
     setBusy(false);
   };
@@ -1354,7 +1645,7 @@ function ModStudio({ me, onClose }) {
             </View>
           ) : (
             <View>
-              <Text style={s.itemSub}>{car.brand} {car.model} {car.year}</Text>
+              <Text style={s.itemSub}>{car.brand} {car.model} {car.year}{SHARED ? `  ·  Bugün kalan hak: ${Math.max(0, AI_DAILY - used)}` : ''}</Text>
               <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 12 }]} onPress={pick}><Text style={[s.btnText, { color: C.accent }]}>{orig ? 'Fotoğrafı değiştir' : 'Fotoğraf seç'}</Text></TouchableOpacity>
               {shown && <Image source={{ uri: shown }} style={{ width: '100%', aspectRatio: 4 / 3, borderRadius: 24, marginTop: 12, backgroundColor: C.card }} resizeMode="contain" />}
               {res && <View style={{ alignItems: 'center' }}><Chips opts={[['Önce', false], ['Sonra', true]]} val={after} onPick={setAfter} /></View>}
@@ -1364,7 +1655,7 @@ function ModStudio({ me, onClose }) {
               {busy && <ActivityIndicator color={C.accent} style={{ marginTop: 12 }} />}
               {!!err && <Text style={[s.hint, { color: '#FF6B6B' }]}>{err}</Text>}
               {res && !busy && <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={share}><Text style={[s.btnText, { color: C.accent }]}>Sonucu paylaş</Text></TouchableOpacity>}
-              <TouchableOpacity onPress={() => { AsyncStorage.removeItem(AIK).catch(() => {}); AIM = null; setKey(''); }}><Text style={[s.hint, { color: C.accent }]}>Anahtarı sil</Text></TouchableOpacity>
+              {!SHARED && <TouchableOpacity onPress={() => { AsyncStorage.removeItem(AIK).catch(() => {}); AIM = null; setKey(''); }}><Text style={[s.hint, { color: C.accent }]}>Anahtarı sil</Text></TouchableOpacity>}
               <Text style={s.hint}>Sonuç yapay zeka yorumudur, birebir gerçek olmayabilir. Ücretsiz kotanın sınırını Google belirler.</Text>
             </View>
           )}
@@ -1415,7 +1706,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
           <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
           <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
           <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
-          <Box title="Günlük hatırlatma" sub="Her gün seçtiğin saatte sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlar."><Chips opts={[['Kapalı', 0], ['12:00', 12], ['17:00', 17], ['18:00', 18], ['20:00', 20]]} val={prefs.daily} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
+          <Box title="Gazlama bildirimleri" sub="Günde 3 kez, rastgele saatlerde (10:00–21:30 arası) sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlanır."><Chips opts={[['Kapalı', 0], ['Açık', 1]]} val={prefs.daily ? 1 : 0} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
           <Box title="Sunucu" sub="Sıralama, kulüpler ve hikayeler için.">
             {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
             <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
@@ -1613,7 +1904,7 @@ function Detail({ t, onBack, onDelete, onUpdate }) {
 
 function AppInner() {
   const sysScheme = useColorScheme();
-  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 18 });
+  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1 });
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
@@ -1994,5 +2285,15 @@ const mk = () => StyleSheet.create({
   edPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#000B', borderRadius: 16, padding: 8 },
   edPT: { color: '#fff', fontWeight: '700', fontSize: 14 },
   edPA: { color: '#ccc', fontSize: 12 },
+  edTrash: { position: 'absolute', bottom: 14, left: '50%', marginLeft: -30, width: 60, height: 60, borderRadius: 30, backgroundColor: '#000B', alignItems: 'center', justifyContent: 'center' },
+  sbadge: { position: 'absolute', right: 14, bottom: 6, color: '#fff', fontWeight: '800', fontSize: 18 },
+  cvTop: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderBottomWidth: 1, borderBottomColor: C.line },
+  cvBar: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, padding: 10, borderTopWidth: 1, borderTopColor: C.line },
+  cvIn: { flex: 1, backgroundColor: C.card, borderRadius: 22, paddingHorizontal: 14, paddingVertical: 10, color: C.text, fontSize: 16, maxHeight: 110 },
+  cvIc: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
+  bub: { maxWidth: '84%', backgroundColor: C.card, borderRadius: 20, padding: 10, marginBottom: 8, alignSelf: 'flex-start' },
+  stkCell: { width: 62, height: 62, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  camBadge: { position: 'absolute', right: 0, bottom: 0, width: 30, height: 30, borderRadius: 15, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center' },
+  chk: { width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: C.dim, alignItems: 'center', justifyContent: 'center' },
 });
 s = mk();

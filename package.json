@@ -1,6 +1,6 @@
 {
   "name": "apexdrive",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
@@ -27,6 +27,8 @@
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo-splash-screen": "*",
     "expo-av": "*",
-    "expo-background-task": "*"
+    "expo-background-task": "*",
+    "expo-document-picker": "*",
+    "expo-image-manipulator": "*"
   }
 }
