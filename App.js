@@ -10,6 +10,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as CFG from './config';
 import { GH_REPO, BUILD } from './repo';
+import * as RP from './repo';
 import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, useColorScheme } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SUPA_URL, SUPA_KEY } from './config';
@@ -1711,7 +1712,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
             {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
             <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
           </Box>
-          <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}`}>
+          <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}${RP.SHA ? ' · ' + RP.SHA : ''}`}>
             {!!msg && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{msg}</Text>}
             <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
             {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
