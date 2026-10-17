@@ -7,7 +7,9 @@
 
 ​Özellikler • Ekran Görüntüleri • Kurulum • Teknolojiler • Katkıda Bulunma
 ​
+
 ​📌 Öne Çıkan Özellikler
+
 ​🗺️ 1.Bölge Ele Geçirme & Harita Modu
 
 ​• Hexagonal Alan Hakimiyeti: Sürüş yaptıkça haritadaki altıgen bölgeleri (hexagons) ele geçirin ve toplam kapsadığınız alanı (km^2) artırın.
