@@ -2,7 +2,7 @@
   "expo": {
     "name": "ApexDrive",
     "slug": "apexdrive",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "orientation": "portrait",
     "icon": "./icon.png",
     "userInterfaceStyle": "dark",
@@ -58,6 +58,14 @@
           "imageWidth": 220,
           "resizeMode": "contain",
           "backgroundColor": "#0B2B4A"
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Galerindeki fotoğraflara erişim gerekir.",
+          "savePhotosPermission": "Hikayeleri galerine kaydetmek için izin gerekir.",
+          "isAccessMediaLocationEnabled": false
         }
       ]
     ]

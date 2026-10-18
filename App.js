@@ -7,6 +7,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import * as BackgroundTask from 'expo-background-task';
 import { Audio } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
+import * as MediaLibrary from 'expo-media-library';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as CFG from './config';
 import { GH_REPO, BUILD } from './repo';
@@ -430,10 +431,11 @@ function Board({ me, friends, addFriend }) {
         <View>
           <Text style={s.title}>TripRank</Text>
           <View style={[s.seg, { position: 'relative', top: 0, alignSelf: 'flex-start', marginBottom: 14 }]}>
-            {[['month', 'Aylık km'], ['car', 'Aynı araç']].map(([k, l]) => (
+            {[['month', 'Km'], ['car', 'Araç']].map(([k, l]) => (
               <TouchableOpacity key={k} style={[s.segBtn, { paddingHorizontal: 20 }, type === k && s.segActive]} onPress={() => setType(k)}><Text style={[s.segText, type === k && { color: C.text }]}>{l}</Text></TouchableOpacity>
             ))}
           </View>
+          {type === 'month' && <Text style={[s.itemSub, { marginBottom: 12 }]}>Bu ayın toplam km sıralaması</Text>}
           {type === 'car' && <Text style={[s.itemSub, { marginBottom: 12 }]}>{car.brand} {car.model} kullananlar</Text>}
           <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
             <TouchableOpacity style={s.fpill} onPress={() => setFr(!fr)}><Ionicons name="people" size={16} color={C.text} /><Text style={s.navText}>{fr ? 'Arkadaşlar' : 'Herkes'}</Text></TouchableOpacity>
@@ -633,7 +635,7 @@ function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, d
   const [seen, setSeen] = useState(false);
   const [mode, setMode] = useState('cells');
   const [sat, setSat] = useState(false);
-  const [people, setPeople] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false);
+  const [people, setPeople] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false), [myst, setMyst] = useState(false);
   useEffect(() => {
     if (mode !== 'stories' || !online || !me) return;
     const load = async () => {
@@ -668,14 +670,16 @@ function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, d
         ))}
       </View>
       {mode === 'stories' && (online ? (
-        <TouchableOpacity style={s.storyBtn} onPress={() => (me ? setComposer(true) : AlertX.alert('Konum bulunamadı', 'Konum izni verip biraz bekle.'))}>
-          <Ionicons name="add-circle" size={22} color="#06101F" /><Text style={s.btnText}>Hikaye paylaş</Text>
-        </TouchableOpacity>
+        <View style={s.stBar}>
+          <TouchableOpacity style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => setMyst(true)}><Ionicons name="albums" size={22} color={C.accent} /><Text style={s.itemTitle}>Hikayelerim</Text></TouchableOpacity>
+          <TouchableOpacity style={s.stAdd} onPress={() => (me ? setComposer(true) : AlertX.alert('Konum bulunamadı', 'Konum izni verip biraz bekle.'))}><Ionicons name="add" size={20} color="#06101F" /><Text style={s.btnText}>Ekle</Text></TouchableOpacity>
+        </View>
       ) : <View style={s.terr}><Text style={s.itemSub}>Hikayeler için sunucu bağlantısı gerekli.</Text></View>)}
-      {person && <PersonSheet u={person} onClose={() => setPerson(null)} />}
+      {person && <PersonSheet u={person} me={profile} onClose={() => setPerson(null)} />}
+      {myst && <MyStories me={profile} onClose={() => setMyst(false)} onAdd={() => { setMyst(false); setComposer(true); }} />}
       {composer && <StoryComposer me={profile} pos={me} onClose={() => setComposer(false)} />}
       {mode !== 'photos' && <TouchableOpacity style={s.satBtn} onPress={() => setSat(!sat)}><Ionicons name={sat ? 'map' : 'earth'} size={22} color={C.text} /></TouchableOpacity>}
-      {region && mode !== 'photos' && (
+      {region && mode !== 'photos' && mode !== 'stories' && (
         <TouchableOpacity style={s.chip} onPress={() => pickPhoto(region.key)}>
           {region.photo ? <Image source={{ uri: region.photo }} style={s.thumb} /> : <View style={s.thumb} />}
           <View style={{ flex: 1 }}>
@@ -942,10 +946,124 @@ function ReplayBox({ t }) {
   );
 }
 
-function PersonSheet({ u, onClose }) {
+function ViewersSheet({ story, onClose }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api(`story_views?story_id=eq.${story.id}&order=viewed_at.desc&select=username,viewed_at`);
+        const j = await r.json();
+        setRows(r.ok && Array.isArray(j) ? j : 'err');
+      } catch { setRows('err'); }
+    })();
+  }, []);
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, maxHeight: '70%' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.sec}>Görüntüleyenler{Array.isArray(rows) ? ` (${rows.length})` : ''}</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          {rows === null && <ActivityIndicator color={C.accent} />}
+          {rows === 'err' && <Text style={s.hint}>Liste yüklenemedi. Sunucuda hikaye görüntüleme tablosu (SQL) eksik olabilir.</Text>}
+          {Array.isArray(rows) && rows.length === 0 && <Text style={s.hint}>Henüz kimse bakmadı.</Text>}
+          <ScrollView>
+            {Array.isArray(rows) && rows.map((v) => (
+              <View key={v.username} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+                <View style={[s.pAv, { width: 38, height: 38, borderRadius: 19, marginVertical: 0 }]}><Text style={s.pLetter}>{v.username[0].toUpperCase()}</Text></View>
+                <Text style={[s.itemTitle, { flex: 1 }]}>{v.username}</Text><Text style={s.itemSub}>{fmtDate(v.viewed_at)}</Text>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+function StoryViewer({ story, me, mine, onClose, onDeleted }) {
+  const ub = unpackCap(story.caption), bm = ub.music;
+  const [playing, setPlaying] = useState(false), [vw, setVw] = useState(false), [cnt, setCnt] = useState(null);
+  const play = async (quiet) => {
+    const ok = await playClip(bm.url, bm.start);
+    setPlaying(ok);
+    if (!ok && !quiet) AlertX.alert('Müzik çalınamadı', 'Telefonun sesini ve internet bağlantını kontrol et.');
+  };
+  useEffect(() => {
+    if (!mine && me) api('story_views?on_conflict=story_id,username', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ story_id: story.id, username: me.username }) }).catch(() => {});
+    if (mine) api(`story_views?story_id=eq.${story.id}&select=username`).then((r) => r.json()).then((j) => { if (Array.isArray(j)) setCnt(j.length); }).catch(() => {});
+    if (bm) play(true);
+    return () => { stopClip(); };
+  }, []);
+  const del = () => AlertX.alert('Hikaye silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: async () => { try { await api(`stories?id=eq.${story.id}`, { method: 'DELETE' }); } catch {} onDeleted && onDeleted(story.id); onClose(); } }]);
+  const download = async () => {
+    try {
+      const f = FileSystem.cacheDirectory + `hikaye_${story.id}.jpg`;
+      await FileSystem.writeAsStringAsync(f, String(story.img).split(',')[1], { encoding: FileSystem.EncodingType.Base64 });
+      const p = await MediaLibrary.requestPermissionsAsync(true);
+      if (p.granted) { await MediaLibrary.saveToLibraryAsync(f); AlertX.alert('Kaydedildi', 'Hikaye galerine kaydedildi.'); } else await Sharing.shareAsync(f);
+    } catch { AlertX.alert('İndirilemedi', 'Tekrar dene.'); }
+  };
+  const menu = () => AlertX.alert('Hikaye', '', [{ text: 'Hikayeyi indir', onPress: download }, { text: 'Hikayeyi sil', style: 'destructive', onPress: del }, { text: 'Vazgeç', style: 'cancel' }]);
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <Image source={{ uri: story.img }} style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }} resizeMode="contain" />
+        <View style={s.svTop}>
+          <Text style={{ color: '#fff', fontWeight: '700' }}>{mine ? 'Hikayen' : ''}</Text>
+          <TouchableOpacity onPress={onClose}><Ionicons name="close" size={30} color="#fff" /></TouchableOpacity>
+        </View>
+        <View style={s.svCap}>
+          {!!ub.text && <Text style={{ color: '#fff', fontSize: 17, textAlign: 'center' }}>{ub.text}</Text>}
+          {bm && (
+            <TouchableOpacity style={s.svMusic} onPress={() => { if (playing) { stopClip(); setPlaying(false); } else play(false); }}>
+              <Ionicons name={playing ? 'pause' : 'play'} size={16} color="#fff" /><Text style={{ color: '#fff' }} numberOfLines={1}>♫ {bm.title} — {bm.artist}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {mine && (
+          <>
+            <TouchableOpacity style={[s.svBtn, { left: 18 }]} onPress={() => setVw(true)}><Ionicons name="eye" size={22} color="#fff" /><Text style={{ color: '#fff', fontWeight: '700' }}>{cnt == null ? '' : cnt}</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.svBtn, { right: 18 }]} onPress={menu}><Ionicons name="ellipsis-horizontal" size={24} color="#fff" /></TouchableOpacity>
+          </>
+        )}
+        {vw && <ViewersSheet story={story} onClose={() => setVw(false)} />}
+      </View>
+    </Modal>
+  );
+}
+function MyStories({ me, onClose, onAdd }) {
+  const [rows, setRows] = useState(null), [big, setBig] = useState(null);
+  const load = async () => {
+    try {
+      const r = await api(`stories?username=eq.${encodeURIComponent(me.username)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at`);
+      const j = await r.json();
+      setRows(Array.isArray(j) ? j : []);
+    } catch { setRows([]); }
+  };
+  useEffect(() => { load(); }, []);
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Hikayelerim</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <TouchableOpacity style={[s.btn, { marginTop: 0, marginBottom: 14 }]} onPress={onAdd}><Text style={s.btnText}>Hikaye ekle</Text></TouchableOpacity>
+          {rows === null && <ActivityIndicator color={C.accent} />}
+          {rows && rows.length === 0 && <Text style={s.hint}>Aktif hikayen yok. Hikayeler 24 saat görünür.</Text>}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {(rows || []).map((x) => (
+              <TouchableOpacity key={x.id} style={{ width: '31%' }} onPress={() => setBig(x)}>
+                <Image source={{ uri: x.img }} style={{ width: '100%', aspectRatio: 0.8, borderRadius: 14 }} />
+                {unpackCap(x.caption).music ? <Text style={s.sbadge}>♫</Text> : null}
+                <Text style={[s.itemSub, { fontSize: 11, marginTop: 4 }]}>{fmtDate(x.created_at)}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+        {big && <StoryViewer story={big} me={me} mine onClose={() => setBig(null)} onDeleted={load} />}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+function PersonSheet({ u, me, onClose }) {
   const [pr, setPr] = useState(null), [st, setSt] = useState([]), [big, setBig] = useState(null);
-  const ub = big ? unpackCap(big.caption) : null, bm = ub ? ub.music : null;
-  useEffect(() => { if (bm) playClip(bm.url, bm.start); return () => { stopClip(); }; }, [big]);
   useEffect(() => {
     (async () => {
       try {
@@ -973,15 +1091,7 @@ function PersonSheet({ u, onClose }) {
           </View>
         </View>
       </Modal>
-      {big && (
-        <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}>
-          <TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}>
-            <Image source={{ uri: big.img }} style={{ width: '100%', height: '75%' }} resizeMode="contain" />
-            <Text style={{ color: '#fff', textAlign: 'center', marginTop: 12, fontSize: 16 }}>{ub.text}</Text>
-            {bm && <Text style={{ color: '#ddd', textAlign: 'center', marginTop: 6 }}>♫ {bm.title} — {bm.artist}</Text>}
-          </TouchableOpacity>
-        </Modal>
-      )}
+      {big && <StoryViewer story={big} me={me} mine={false} onClose={() => setBig(null)} />}
     </>
   );
 }
@@ -1022,12 +1132,13 @@ const sfx = { s: null };
 async function stopClip() { try { if (sfx.s) await sfx.s.unloadAsync(); } catch {} sfx.s = null; }
 async function playClip(url, start) {
   await stopClip();
+  try { await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true }); } catch {}
   try {
-    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
     const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true, positionMillis: start * 1000 });
     sfx.s = sound;
     sound.setOnPlaybackStatusUpdate((st) => { if (st.isLoaded && st.positionMillis >= (start + 15) * 1000) sound.setPositionAsync(start * 1000).catch(() => {}); });
-  } catch {}
+    return true;
+  } catch { return false; }
 }
 function MusicSheet({ onPick, onClose }) {
   const [q, setQ] = useState(''), [res, setRes] = useState([]), [busy, setBusy] = useState(false), [sel, setSel] = useState(null), [start, setStart] = useState(0), [err, setErr] = useState('');
@@ -1237,15 +1348,15 @@ async function openClubFile(p) {
 }
 const fileMeta = (p) => { try { return JSON.parse(p.meta || '{}'); } catch { return {}; } };
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
-function MediaImg({ id, style, contain, onPress }) {
+function MediaImg({ id, style, contain, onPress, onLong }) {
   const [u, setU] = useState(mcache.get(id) || null);
   useEffect(() => { if (!u) loadMedia(id).then(setU).catch(() => {}); }, [id]);
   const img = u ? <Image source={{ uri: u }} style={style} resizeMode={contain ? 'contain' : 'cover'} /> : <View style={[style, { backgroundColor: C.line, alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={C.accent} /></View>;
-  return onPress ? <TouchableOpacity onPress={() => onPress(u)}>{img}</TouchableOpacity> : img;
+  return onPress || onLong ? <TouchableOpacity onPress={onPress ? () => onPress(u) : undefined} onLongPress={onLong} delayLongPress={350}>{img}</TouchableOpacity> : img;
 }
-function Linkify({ text, style }) {
+function Linkify({ text, style, onLong }) {
   const parts = String(text || '').split(/(https?:\/\/[^\s]+)/g);
-  return <Text style={style}>{parts.map((p, i) => (/^https?:\/\//.test(p) ? <Text key={i} style={{ color: C.accent, textDecorationLine: 'underline' }} onPress={() => Linking.openURL(p).catch(() => {})}>{p}</Text> : p))}</Text>;
+  return <Text style={style}>{parts.map((p, i) => (/^https?:\/\//.test(p) ? <Text key={i} style={{ color: C.accent, textDecorationLine: 'underline' }} onPress={() => Linking.openURL(p).catch(() => {})} onLongPress={onLong}>{p}</Text> : p))}</Text>;
 }
 function Av({ club, size = 40 }) {
   return club.photo
@@ -1342,7 +1453,7 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
   };
   const pickPhoto = async () => {
     try {
-      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8, allowsEditing: true, aspect: [1, 1] });
       if (r.canceled) return;
       const d = await shrink(r.assets[0].uri, 320);
       if (d) patchClub({ photo: d }); else AlertX.alert('Fotoğraf hazırlanamadı', 'Başka bir fotoğraf dene.');
@@ -1415,8 +1526,22 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
     </Modal>
   );
 }
+const canEditMsg = (p, me) => p.username === me.username && (p.kind || 'text') === 'text' && Date.now() - new Date(p.created_at).getTime() <= 900000;
+const pinText = (p) => { const k = p.kind || 'text'; return k === 'image' ? '📷 Fotoğraf' : k === 'sticker' ? 'Çıkartma' : k === 'file' ? fileMeta(p).name || 'Dosya' : p.body; };
+function PinBar({ pin, onGo, onClose }) {
+  return (
+    <TouchableOpacity style={s.pinBar} onPress={onGo}>
+      <Ionicons name="pin" size={18} color={C.accent} />
+      <View style={{ flex: 1 }}><Text style={[s.itemSub, { color: C.accent }]}>{pin.username} · sabitlenen mesaj</Text><Text style={s.itemTitle} numberOfLines={1}>{pinText(pin)}</Text></View>
+      <TouchableOpacity onPress={onClose} style={{ padding: 6 }}><Ionicons name="close" size={18} color={C.dim} /></TouchableOpacity>
+    </TouchableOpacity>
+  );
+}
 function ClubView({ club: club0, me, onBack }) {
-  const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [txt, setTxt] = useState(''), [stk, setStk] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null);
+  const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [pin, setPin] = useState(null), [txt, setTxt] = useState(''), [edit, setEdit] = useState(null);
+  const [stk, setStk] = useState(false), [att, setAtt] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null), [hl, setHl] = useState(null), [limit, setLimit] = useState(60), [jump, setJump] = useState(null);
+  const listRef = useRef(null);
+  const staff = club.owner === me.username || mem.some((m) => m.username === me.username && m.role === 'admin');
   const isM = mem.some((m) => m.username === me.username) || club.owner === me.username;
   const load = async () => {
     try {
@@ -1425,12 +1550,25 @@ function ClubView({ club: club0, me, onBack }) {
       const ms = await r.json(), ns = Array.isArray(ms) ? ms.map((m) => m.username) : [];
       const pr = ns.length ? await (await api(`profiles?username=in.(${ns.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`)).json() : [];
       setMem(ns.length ? ms.map((m) => ({ ...m, ...((Array.isArray(pr) ? pr : []).find((p) => p.username === m.username) || {}) })).sort((a, b) => (b.total_km || 0) - (a.total_km || 0)) : []);
-      let q = await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=60&select=id,username,body,created_at,kind,meta`);
-      if (!q.ok) q = await api(`club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=60&select=id,username,body,created_at`);
+      const base = `club_posts?club_id=eq.${club.id}&order=created_at.desc&limit=${limit}`;
+      let q = await api(`${base}&select=id,username,body,created_at,kind,meta,pinned_at`);
+      if (!q.ok) q = await api(`${base}&select=id,username,body,created_at,kind,meta`);
+      if (!q.ok) q = await api(`${base}&select=id,username,body,created_at`);
       const pj = await q.json(); setPosts(Array.isArray(pj) ? pj : []);
+      try {
+        const pp = await (await api(`club_posts?club_id=eq.${club.id}&pinned_at=not.is.null&order=pinned_at.desc&limit=1&select=id,username,body,created_at,kind,meta,pinned_at`)).json();
+        setPin(Array.isArray(pp) && pp[0] ? pp[0] : null);
+      } catch {}
     } catch {}
   };
-  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, []);
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [limit]);
+  const goTo = (id) => {
+    const i = posts.findIndex((x) => x.id === id);
+    if (i < 0) { setJump(id); setLimit(400); return; }
+    try { listRef.current && listRef.current.scrollToIndex({ index: i, animated: true, viewPosition: 0.5 }); } catch {}
+    setHl(id); setTimeout(() => setHl(null), 1800);
+  };
+  useEffect(() => { if (jump && posts.some((p) => p.id === jump)) { const id = jump; setJump(null); setTimeout(() => goTo(id), 300); } }, [posts]);
   const send = async (row) => {
     const plain = !row.kind || row.kind === 'text';
     try {
@@ -1439,7 +1577,33 @@ function ClubView({ club: club0, me, onBack }) {
       else load();
     } catch { AlertX.alert('Gönderilemedi', 'Bağlantını kontrol et.'); }
   };
-  const sendText = () => { if (txt.trim()) { send({ body: txt.trim() }); setTxt(''); } };
+  const saveEdit = async () => {
+    const t = txt.trim();
+    if (!t || !edit) return;
+    if (!canEditMsg(edit, me)) { AlertX.alert('Süre doldu', 'Mesaj yalnızca gönderildikten sonraki 15 dakika içinde düzenlenebilir.'); setEdit(null); setTxt(''); return; }
+    try {
+      let r = await api(`club_posts?id=eq.${edit.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ body: t, meta: 'edited' }) });
+      if (!r.ok) r = await api(`club_posts?id=eq.${edit.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ body: t }) });
+      if (!r.ok) AlertX.alert('Düzenlenemedi', 'Bağlantını kontrol et.');
+    } catch {}
+    setEdit(null); setTxt(''); load();
+  };
+  const sendText = () => { if (edit) return saveEdit(); if (txt.trim()) { send({ body: txt.trim() }); setTxt(''); } };
+  const delMsg = (p) => AlertX.alert('Mesaj silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: async () => { try { await api(`club_posts?id=eq.${p.id}`, { method: 'DELETE' }); mcache.delete(p.id); } catch {} load(); } }]);
+  const togglePin = async (p) => {
+    try {
+      const r = await api(`club_posts?id=eq.${p.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ pinned_at: p.pinned_at ? null : new Date().toISOString() }) });
+      if (!r.ok) AlertX.alert('Sabitlenemedi', 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.');
+    } catch {}
+    load();
+  };
+  const msgMenu = (p) => {
+    const k = p.kind || 'text', btns = [{ text: p.pinned_at ? 'Sabitlemeyi kaldır' : 'Sabitle', onPress: () => togglePin(p) }];
+    if (canEditMsg(p, me)) btns.push({ text: 'Düzenle', onPress: () => { setEdit(p); setTxt(p.body); } });
+    if (p.username === me.username || staff) btns.push({ text: 'Sil', style: 'destructive', onPress: () => delMsg(p) });
+    btns.push({ text: 'Vazgeç', style: 'cancel' });
+    AlertX.alert(p.username, k === 'text' ? String(p.body).slice(0, 80) + (p.username === me.username && !canEditMsg(p, me) ? '\n(Düzenleme süresi 15 dk idi)' : '') : '', btns);
+  };
   const sendPhoto = async () => {
     try {
       const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
@@ -1459,24 +1623,23 @@ function ClubView({ club: club0, me, onBack }) {
       send({ kind: 'file', media: b, meta: JSON.stringify({ name: a.name, size: a.size, mime: a.mimeType }) });
     } catch { AlertX.alert('Dosya gönderilemedi', 'Tekrar dene.'); }
   };
-  const attach = () => AlertX.alert('Ekle', 'Ne göndermek istersin?', [{ text: 'Fotoğraf', onPress: sendPhoto }, { text: 'Dosya', onPress: sendFile }, { text: 'Vazgeç', style: 'cancel' }]);
   const join = async () => { try { await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username }) }); load(); } catch {} };
   const Bub = ({ p }) => {
-    const mine = p.username === me.username, k = p.kind || 'text';
-    const body = k === 'image' ? <MediaImg id={p.id} style={{ width: 220, height: 220, borderRadius: 14 }} onPress={(u) => u && setBig(u)} />
-      : k === 'sticker' ? (p.meta === 'img' ? <MediaImg id={p.id} contain style={{ width: 120, height: 120 }} /> : <Text style={{ fontSize: 56 }}>{p.body}</Text>)
+    const mine = p.username === me.username, k = p.kind || 'text', lp = () => msgMenu(p);
+    const body = k === 'image' ? <MediaImg id={p.id} style={{ width: 220, height: 220, borderRadius: 14 }} onPress={(u) => u && setBig(u)} onLong={lp} />
+      : k === 'sticker' ? (p.meta === 'img' ? <MediaImg id={p.id} contain onLong={lp} style={{ width: 120, height: 120 }} /> : <Text style={{ fontSize: 56 }}>{p.body}</Text>)
       : k === 'file' ? (
-        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => openClubFile(p)}>
+        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => openClubFile(p)} onLongPress={lp} delayLongPress={350}>
           <Ionicons name="document-text" size={28} color={C.accent} />
           <View style={{ maxWidth: 180 }}><Text style={s.itemTitle} numberOfLines={1}>{fileMeta(p).name || 'Dosya'}</Text><Text style={s.itemSub}>{fmtSize(fileMeta(p).size || 0)}</Text></View>
         </TouchableOpacity>
-      ) : <Linkify text={p.body} style={{ color: C.text, fontSize: 16 }} />;
+      ) : <Linkify text={p.body} onLong={lp} style={{ color: C.text, fontSize: 16 }} />;
     return (
-      <View style={[s.bub, mine && { alignSelf: 'flex-end', backgroundColor: C.sel }, k === 'sticker' && { backgroundColor: 'transparent', padding: 0 }]}>
-        {!mine && <Text style={[s.itemSub, { color: C.accent, marginBottom: 2 }]}>{p.username}</Text>}
+      <TouchableOpacity activeOpacity={0.9} onLongPress={lp} delayLongPress={350} style={[s.bub, mine && { alignSelf: 'flex-end', backgroundColor: C.sel }, k === 'sticker' && { backgroundColor: 'transparent', padding: 0 }, hl === p.id && { borderWidth: 2, borderColor: C.accent }]}>
+        <Text style={[s.itemSub, { color: C.accent, fontWeight: '700', marginBottom: 2 }]}>{p.username}</Text>
         {body}
-        <Text style={[s.itemSub, { fontSize: 11, marginTop: 4, textAlign: 'right' }]}>{fmtDate(p.created_at)}</Text>
-      </View>
+        <Text style={[s.itemSub, { fontSize: 11, marginTop: 4, textAlign: 'right' }]}>{p.pinned_at ? '📌 ' : ''}{k === 'text' && p.meta === 'edited' ? 'düzenlendi · ' : ''}{fmtDate(p.created_at)}</Text>
+      </TouchableOpacity>
     );
   };
   return (
@@ -1489,15 +1652,43 @@ function ClubView({ club: club0, me, onBack }) {
         </TouchableOpacity>
         <TouchableOpacity onPress={() => setSet(true)} style={{ padding: 6 }}><Ionicons name="settings-outline" size={24} color={C.text} /></TouchableOpacity>
       </View>
+      {pin && <PinBar pin={pin} onGo={() => goTo(pin.id)} onClose={() => togglePin(pin)} />}
       {!isM && <TouchableOpacity style={[s.btn, { margin: 14 }]} onPress={join}><Text style={s.btnText}>Kulübe katıl</Text></TouchableOpacity>}
-      <FlatList inverted data={posts} keyExtractor={(p) => String(p.id)} contentContainerStyle={{ padding: 14 }} ListEmptyComponent={<Text style={[s.hint, { transform: [{ scaleY: -1 }] }]}>Henüz mesaj yok.</Text>} renderItem={({ item }) => <Bub p={item} />} />
+      <FlatList ref={listRef} inverted data={posts} extraData={hl} keyExtractor={(p) => String(p.id)} contentContainerStyle={{ padding: 14 }}
+        onScrollToIndexFailed={(info) => { listRef.current && listRef.current.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true }); setTimeout(() => { try { listRef.current && listRef.current.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }); } catch {} }, 350); }}
+        ListEmptyComponent={<Text style={[s.hint, { transform: [{ scaleY: -1 }] }]}>Henüz mesaj yok.</Text>} renderItem={({ item }) => <Bub p={item} />} />
       {isM && (
-        <View style={s.cvBar}>
-          <TouchableOpacity onPress={attach} style={s.cvIc}><Ionicons name="attach" size={24} color={C.dim} /></TouchableOpacity>
-          <TextInput style={s.cvIn} value={txt} onChangeText={setTxt} placeholder="Mesaj yaz" placeholderTextColor={C.dim} maxLength={500} multiline />
-          <TouchableOpacity onPress={() => setStk(true)} style={s.cvIc}><Ionicons name="happy-outline" size={24} color={C.dim} /></TouchableOpacity>
-          <TouchableOpacity onPress={sendText} style={[s.cvIc, { backgroundColor: C.accent }]}><Ionicons name="send" size={18} color="#06101F" /></TouchableOpacity>
+        <View>
+          {edit && (
+            <View style={s.editBar}>
+              <Ionicons name="create" size={16} color={C.accent} />
+              <Text style={[s.itemSub, { flex: 1 }]} numberOfLines={1}>Mesajı düzenliyorsun: {edit.body}</Text>
+              <TouchableOpacity onPress={() => { setEdit(null); setTxt(''); }}><Ionicons name="close" size={18} color={C.dim} /></TouchableOpacity>
+            </View>
+          )}
+          <View style={s.cvBar}>
+            {!edit && <TouchableOpacity onPress={() => setAtt(true)} style={s.cvIc}><Ionicons name="attach" size={24} color={C.dim} /></TouchableOpacity>}
+            <TextInput style={s.cvIn} value={txt} onChangeText={setTxt} placeholder="Mesaj yaz" placeholderTextColor={C.dim} maxLength={500} multiline />
+            {!edit && <TouchableOpacity onPress={() => setStk(true)} style={s.cvIc}><Ionicons name="happy-outline" size={24} color={C.dim} /></TouchableOpacity>}
+            <TouchableOpacity onPress={sendText} style={[s.cvIc, { backgroundColor: C.accent }]}><Ionicons name={edit ? 'checkmark' : 'send'} size={18} color="#06101F" /></TouchableOpacity>
+          </View>
         </View>
+      )}
+      {att && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setAtt(false)}>
+          <TouchableOpacity activeOpacity={1} style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }} onPress={() => setAtt(false)}>
+            <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20 }}>
+              <Text style={s.sec}>Ne göndermek istersin?</Text>
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                {[['image', 'Fotoğraf', sendPhoto], ['document-text', 'Dosya', sendFile]].map(([ic, l, fn]) => (
+                  <TouchableOpacity key={l} style={[s.card, { alignItems: 'center', paddingVertical: 22 }]} onPress={() => { setAtt(false); setTimeout(fn, 250); }}>
+                    <Ionicons name={ic} size={34} color={C.accent} /><Text style={[s.itemTitle, { marginTop: 8 }]}>{l}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </TouchableOpacity>
+        </Modal>
       )}
       {stk && <StickerSheet onClose={() => setStk(false)} onPick={(r) => { setStk(false); send(r); }} />}
       {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
@@ -1666,7 +1857,7 @@ function ModStudio({ me, onClose }) {
   );
 }
 
-function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck, onOpenMod }) {
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
@@ -1717,7 +1908,10 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
             <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
             {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
           </Box>
-                  </ScrollView>
+          <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={onOpenMod}>
+            <Ionicons name="color-wand" size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Modifiye (AI)</Text><Ionicons name="chevron-forward" size={20} color={C.dim} />
+          </TouchableOpacity>
+        </ScrollView>
       </SafeAreaView>
     </Modal>
   );
@@ -1743,7 +1937,7 @@ function DialogHost({ dlg, onClose }) {
             {btns.map((b, i) => {
               const k = kind(b, i);
               return (
-                <TouchableOpacity key={i} style={[s.dlgB, { backgroundColor: BG[k] }]} onPress={() => { onClose(); b.onPress && b.onPress(); }}>
+                <TouchableOpacity key={i} style={[s.dlgB, { backgroundColor: BG[k] }, btns.length > 2 && { flex: 0, minHeight: 46 }]} onPress={() => { onClose(); b.onPress && b.onPress(); }}>
                   <Text style={[s.dlgBT, { color: FG[k] }]}>{b.text}</Text>
                 </TouchableOpacity>
               );
@@ -2138,7 +2332,7 @@ function AppInner() {
           <View style={s.dBg}>
             <View style={s.dPanel}>
               <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
-              {[['clubs', 'people', 'Kulüpler'], ['mod', 'color-wand', 'Modifiye (AI)']].map(([k, ic, l]) => (
+              {[['clubs', 'people', 'Kulüpler']].map(([k, ic, l]) => (
                 <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
               ))}
             </View>
@@ -2148,7 +2342,7 @@ function AppInner() {
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'mod' && <ModStudio me={profile} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
-        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} onOpenMod={() => { setSettingsOpen(false); setAutoUpd(false); setScreen('mod'); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
@@ -2248,7 +2442,7 @@ const mk = () => StyleSheet.create({
   shV: { color: '#fff', fontSize: 34, fontWeight: '800' },
   shBrand: { color: '#fff', fontSize: 22, fontWeight: '800', fontStyle: 'italic' },
   dot: { width: 44, height: 44, borderRadius: 22, borderWidth: 2 },
-  satBtn: { position: 'absolute', right: 16, bottom: 176, width: 48, height: 48, borderRadius: 24, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
+  satBtn: { position: 'absolute', right: 16, bottom: 192, width: 48, height: 48, borderRadius: 24, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
   hdr: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingTop: 4 },
   hdrT: { color: C.text, fontSize: 18, fontWeight: '800', fontStyle: 'italic', marginLeft: 6 },
   dBg: { flex: 1, flexDirection: 'row', backgroundColor: '#0009' },
@@ -2296,5 +2490,13 @@ const mk = () => StyleSheet.create({
   stkCell: { width: 62, height: 62, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   camBadge: { position: 'absolute', right: 0, bottom: 0, width: 30, height: 30, borderRadius: 15, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center' },
   chk: { width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: C.dim, alignItems: 'center', justifyContent: 'center' },
+  pinBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.line },
+  editBar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: C.card },
+  svTop: { position: 'absolute', top: 40, left: 20, right: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  svCap: { position: 'absolute', bottom: 100, left: 20, right: 20, alignItems: 'center', gap: 10 },
+  svMusic: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#000A', borderRadius: 20, paddingVertical: 8, paddingHorizontal: 14, maxWidth: '100%' },
+  svBtn: { position: 'absolute', bottom: 34, minWidth: 50, height: 50, borderRadius: 25, backgroundColor: '#000A', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 14 },
+  stBar: { position: 'absolute', left: 16, right: 16, bottom: 100, flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, borderRadius: 28, padding: 12 },
+  stAdd: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.accent, borderRadius: 22, paddingVertical: 9, paddingHorizontal: 16 },
 });
 s = mk();
