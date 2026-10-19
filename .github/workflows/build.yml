@@ -18,7 +18,6 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: echo "export const GH_REPO = '${{ github.repository }}'; export const BUILD = ${{ github.run_number }}; export const SHA = '${GITHUB_SHA::7}';" > repo.js
-      - run: echo "export const AI_KEY = '${{ secrets.AI_KEY }}';" >> config.js
       - run: npm install --legacy-peer-deps
       - run: npx expo install --fix
       - run: node -e "const j=require('./app.json');j.expo.android.versionCode=${{ github.run_number }};require('fs').writeFileSync('app.json',JSON.stringify(j,null,2))"
