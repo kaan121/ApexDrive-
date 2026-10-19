@@ -9,10 +9,9 @@ import { Audio } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as CFG from './config';
 import { GH_REPO, BUILD } from './repo';
 import * as RP from './repo';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, useColorScheme } from 'react-native';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, Keyboard, useColorScheme } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SUPA_URL, SUPA_KEY } from './config';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -163,6 +162,12 @@ TaskManager.defineTask(UPD_TASK, async () => { await notifyUpdate(); return Back
 
 // ---- Yardımcılar: toplamlar ve sıralama sunucusu ----
 const totals = (trips) => trips.reduce((a, t) => ({ dist: a.dist + t.dist, time: a.time + t.duration, still: a.still + (t.still || 0), n: a.n + 1, top: Math.max(a.top, t.max), left: a.left + (t.left || 0), right: a.right + (t.right || 0), brake: a.brake + t.brake, hacc: a.hacc + t.acc, dec: Math.max(a.dec, t.maxDec || 0), acc: Math.max(a.acc, t.maxAcc || 0), g: Math.max(a.g, t.maxG), stops: a.stops + t.stops }), { dist: 0, time: 0, still: 0, n: 0, top: 0, left: 0, right: 0, brake: 0, hacc: 0, dec: 0, acc: 0, g: 0, stops: 0 });
+const tripsOf = (trips, vid) => trips.filter((t) => (t.veh || 'v0') === (vid || 'v0'));
+const carOf = (v) => ({ brand: v.brand, model: v.model, year: v.year, vtype: v.vtype });
+const initGarage = (p) => (p && p.car && !p.vehicles ? { ...p, vehicles: [{ id: 'v0', ...carOf(p.car) }], vid: 'v0' } : p);
+const withVehicle = (p, v) => { const nv = { id: 'v' + Date.now(), ...v }; return { ...p, vehicles: [...(p.vehicles || []), nv], vid: nv.id, car: carOf(nv) }; };
+const pickVehicle = (p, id) => { const v = (p.vehicles || []).find((x) => x.id === id); return v ? { ...p, vid: id, car: carOf(v) } : p; };
+const dropVehicle = (p, id) => { const rest = (p.vehicles || []).filter((x) => x.id !== id); if (!rest.length) return p; const nx = rest.find((x) => x.id === p.vid) || rest[0]; return { ...p, vehicles: rest, vid: nx.id, car: carOf(nx) }; };
 const fmtDur = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}sa ${m}dk` : `${m}dk`; };
 const online = !!(SUPA_URL && SUPA_KEY);
 const api = (path, opt = {}) => fetch(`${SUPA_URL}/rest/v1/${path}`, { ...opt, headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}`, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
@@ -177,7 +182,7 @@ const ensureProfile = (p) => online && api('profiles?on_conflict=username', { me
 const monthKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}`;
 const syncProfile = (p, trips) => {
   if (!online) return;
-  const tt = totals(trips), mk = monthKey(new Date()), car = p.car || {};
+  const tt = totals(tripsOf(trips, p.vid)), mk = monthKey(new Date()), car = p.car || {};
   const mkm = trips.filter((t) => monthKey(new Date(t.start)) === mk).reduce((a, t) => a + t.dist, 0);
   api(`profiles?username=eq.${encodeURIComponent(p.username)}&device_id=eq.${p.deviceId}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) }).catch(() => {});
 };
@@ -630,7 +635,7 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
   );
 }
 
-function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, delPhoto, onPan }) {
+function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pickPhoto, delPhoto, onPan }) {
   const [me, setMe] = useState(null);
   const [seen, setSeen] = useState(false);
   const [mode, setMode] = useState('cells');
@@ -691,8 +696,11 @@ function MapTab({ route, cells, on, region, regions, name, profile, pickPhoto, d
       {mode === 'cells' && (
         <View style={s.terr}>
           <View style={s.tav}><Text style={s.tavT}>{name.slice(0, 2).toUpperCase()}</Text></View>
-          <Text style={s.tname}>{name.toUpperCase()}</Text>
-          <Text style={s.tkm}>{(cells.length * 2.598 * Math.pow(0.5 * Math.cos(((me?.latitude ?? 40) * Math.PI) / 180), 2)).toFixed(1)} km²</Text>
+          <Text style={s.tname} numberOfLines={1}>{name.toUpperCase()}</Text>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={s.tkm}>{(cells.length * 2.598 * Math.pow(0.5 * Math.cos(((me?.latitude ?? 40) * Math.PI) / 180), 2)).toFixed(1)} km²</Text>
+            <Text style={s.tsub}>{(totalKm || 0).toFixed(1)} km sürüldü · {cells.length} bölge</Text>
+          </View>
         </View>
       )}
     </View>
@@ -860,28 +868,68 @@ async function scheduleDaily(prefs, trips) {
     }
   } catch {}
 }
-async function scheduleReminders(docs, rem) {
+async function scheduleReminders(by, rem, vehicles) {
   try {
     const all = await Notifications.getAllScheduledNotificationsAsync();
     await Promise.all(all.filter((n) => !String(n.identifier).startsWith('gas-')).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
-    if (!DOCS.some(([k]) => parseDate(docs[k]))) return;
+    const vs = vehicles || [], list = Object.entries(by || {}).filter(([vid, d]) => d && (!vs.length || vs.some((x) => x.id === vid)) && DOCS.some(([k]) => parseDate(d[k])));
+    if (!list.length) return;
     const perm = await Notifications.requestPermissionsAsync();
     if (!perm.granted) return;
     if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('default', { name: 'Hatırlatmalar', importance: Notifications.AndroidImportance.HIGH });
-    for (const [k, label] of DOCS) {
-      const d = parseDate(docs[k]); if (!d) continue;
-      const offs = new Set([0]);
-      for (let o = rem.start; o > 0; o -= rem.freq) offs.add(o);
-      const times = [...offs].map((o) => { const t = new Date(d); t.setDate(t.getDate() - o); t.setHours(rem.hour, 0, 0, 0); return { t, o }; }).filter((x) => x.t.getTime() > Date.now()).sort((a, b) => a.t - b.t).slice(0, 15);
-      for (const { t, o } of times) {
-        await Notifications.scheduleNotificationAsync({ identifier: `veh-${k}-${o}`, content: { title: `${label} hatırlatması`, body: o === 0 ? `${label} bugün bitiyor!` : `${label} bitişine ${o} gün kaldı.` }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t } });
+    const many = vs.length > 1, cap = many ? 6 : 15;
+    for (const [vid, docs] of list) {
+      const v = vs.find((x) => x.id === vid), suffix = many && v ? ` (${v.brand} ${v.model})` : '';
+      for (const [k, label0] of DOCS) {
+        const label = label0 + suffix, d = parseDate(docs[k]);
+        if (!d) continue;
+        const offs = new Set([0]);
+        for (let o = rem.start; o > 0; o -= rem.freq) offs.add(o);
+        const times = [...offs].map((o) => { const t = new Date(d); t.setDate(t.getDate() - o); t.setHours(rem.hour, 0, 0, 0); return { t, o }; }).filter((x) => x.t.getTime() > Date.now()).sort((a, b) => a.t - b.t).slice(0, cap);
+        for (const { t, o } of times) {
+          await Notifications.scheduleNotificationAsync({ identifier: `veh-${vid}-${k}-${o}`, content: { title: `${label} hatırlatması`, body: o === 0 ? `${label} bugün bitiyor!` : `${label} bitişine ${o} gün kaldı.` }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t } });
+        }
       }
     }
   } catch {}
 }
 const fmtD = (v) => { const x = v.replace(/\D/g, '').slice(0, 8); return x.length > 4 ? `${x.slice(0, 2)}.${x.slice(2, 4)}.${x.slice(4)}` : x.length > 2 ? `${x.slice(0, 2)}.${x.slice(2)}` : x; };
 
-function VehicleTab({ me, docs, setDocs, rem, setRem }) {
+function AddVehicle({ onAdd, onClose }) {
+  const [vt, setVt] = useState('car'), [car, setCar] = useState({ brand: '', model: '', year: '' }), [pick, setPick] = useState(null);
+  const map = vt === 'moto' ? MOTO_MAP : CAR_MAP;
+  const Field = ({ label, value, onPress, off }) => (
+    <TouchableOpacity style={[s.input, off && { opacity: 0.4 }]} onPress={off ? undefined : onPress}><Text style={{ color: value ? C.text : C.dim, fontSize: 17 }}>{value || label}</Text></TouchableOpacity>
+  );
+  const ok = () => {
+    if (!car.brand || !car.model || !car.year) return AlertX.alert('Eksik bilgi', 'Marka, model ve yılı seç.');
+    onAdd({ brand: car.brand, model: car.model, year: +car.year, vtype: vt });
+  };
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Araç ekle</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <Chips opts={[['Araba', 'car'], ['Motor', 'moto']]} val={vt} onPick={(v) => { setVt(v); setCar({ brand: '', model: '', year: car.year }); }} />
+          <Field label="Marka" value={car.brand} onPress={() => setPick('brand')} />
+          <Field label="Model" value={car.model} off={!car.brand} onPress={() => setPick('model')} />
+          <Field label="Yıl" value={car.year} onPress={() => setPick('year')} />
+          <TouchableOpacity style={s.btn} onPress={ok}><Text style={s.btnText}>Ekle</Text></TouchableOpacity>
+        </View>
+      </View>
+      {pick && (
+        <Picker
+          title={{ brand: 'Marka', model: 'Model', year: 'Yıl' }[pick]}
+          options={pick === 'brand' ? Object.keys(map).sort((a, b) => a.localeCompare(b, 'tr')) : pick === 'model' ? map[car.brand] || [] : YEARS}
+          onClose={() => setPick(null)}
+          onPick={(v) => { setCar(pick === 'brand' ? { brand: v, model: '', year: car.year } : { ...car, [pick]: v }); setPick(null); }}
+        />
+      )}
+    </Modal>
+  );
+}
+function VehicleTab({ me, docs, setDocs, rem, setRem, garage = { vehicles: [], vid: 'v0' }, onSelect, onAdd, onRemove, stats = { km: 0, n: 0 } }) {
+  const [addOpen, setAddOpen] = useState(false);
   const setStart = (k, v) => { const d = parseDate(v), y = docs['yr_' + k] || DEFY[k]; setDocs({ ...docs, ['st_' + k]: v, [k]: d ? fmtOut(addYears(d, y)) : '' }); };
   const setYears = (k, y) => { const d = parseDate(docs['st_' + k]); setDocs({ ...docs, ['yr_' + k]: y, ...(d ? { [k]: fmtOut(addYears(d, y)) } : {}) }); };
   const test = async () => {
@@ -893,7 +941,21 @@ function VehicleTab({ me, docs, setDocs, rem, setRem }) {
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }} keyboardShouldPersistTaps="handled">
       <Text style={s.title}>Araç</Text>
-      {me.car && <Text style={[s.itemSub, { marginBottom: 14 }]}>{me.car.brand} {me.car.model} · {me.car.year}</Text>}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12, marginHorizontal: -4 }} contentContainerStyle={{ gap: 10, paddingHorizontal: 4 }}>
+        {garage.vehicles.map((v) => (
+          <TouchableOpacity key={v.id} style={[s.gCard, v.id === garage.vid && { borderColor: C.accent }]} onPress={() => onSelect && onSelect(v.id)} onLongPress={() => onRemove && onRemove(v.id)} delayLongPress={450}>
+            {v.vtype === 'moto' ? <MaterialCommunityIcons name="motorbike" size={26} color={C.accent} /> : <Ionicons name="car-sport" size={26} color={C.accent} />}
+            <Text style={s.itemTitle} numberOfLines={1}>{v.brand} {v.model}</Text>
+            <Text style={s.itemSub}>{v.year}{v.id === garage.vid ? ' · seçili' : ''}</Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity style={[s.gCard, s.gAdd]} onPress={() => setAddOpen(true)}>
+          <Ionicons name="add" size={28} color={C.accent} /><Text style={s.itemTitle}>Araç ekle</Text><Text style={s.itemSub}>Araba veya motor</Text>
+        </TouchableOpacity>
+      </ScrollView>
+      {me.car && <Text style={[s.itemSub, { marginBottom: 4 }]}>{me.car.brand} {me.car.model} · {me.car.year}</Text>}
+      <Text style={[s.itemSub, { marginBottom: 14, color: C.text }]}>Bu araçla: {stats.km.toFixed(1)} km · {stats.n} sürüş</Text>
+      {garage.vehicles.length > 1 && <Text style={[s.hint, { textAlign: 'left', marginTop: 0, marginBottom: 12 }]}>Silmek için araca uzun bas. Km, dönüşler ve belgeler seçili araca göre gösterilir.</Text>}
       <Text style={[s.itemSub, { marginBottom: 12 }]}>Başlangıç tarihini ve süreyi gir, bitiş tarihi kendiliğinden hesaplanır.</Text>
       {DOCS.map(([k, label, icon]) => {
         const d = parseDate(docs[k]), left = d ? daysLeft(d) : null;
@@ -923,6 +985,7 @@ function VehicleTab({ me, docs, setDocs, rem, setRem }) {
         <Text style={[s.itemSub, { marginTop: 14 }]}>Bitiş gününde ayrıca bir hatırlatma gelir.</Text>
       </View>
       <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={test}><Text style={[s.btnText, { color: C.accent }]}>Test bildirimi gönder</Text></TouchableOpacity>
+      {addOpen && <AddVehicle onAdd={(v) => { setAddOpen(false); onAdd && onAdd(v); }} onClose={() => setAddOpen(false)} />}
     </ScrollView>
   );
 }
@@ -1537,10 +1600,20 @@ function PinBar({ pin, onGo, onClose }) {
     </TouchableOpacity>
   );
 }
+function useKbd() {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const ios = Platform.OS === 'ios';
+    const a = Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', (e) => setH(e.endCoordinates.height));
+    const b = Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => setH(0));
+    return () => { a.remove(); b.remove(); };
+  }, []);
+  return h;
+}
 function ClubView({ club: club0, me, onBack }) {
   const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [pin, setPin] = useState(null), [txt, setTxt] = useState(''), [edit, setEdit] = useState(null);
   const [stk, setStk] = useState(false), [att, setAtt] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null), [hl, setHl] = useState(null), [limit, setLimit] = useState(60), [jump, setJump] = useState(null);
-  const listRef = useRef(null);
+  const listRef = useRef(null), kb = useKbd();
   const staff = club.owner === me.username || mem.some((m) => m.username === me.username && m.role === 'admin');
   const isM = mem.some((m) => m.username === me.username) || club.owner === me.username;
   const load = async () => {
@@ -1643,7 +1716,7 @@ function ClubView({ club: club0, me, onBack }) {
     );
   };
   return (
-    <View style={{ flex: 1 }}>
+    <View style={{ flex: 1, paddingBottom: kb }}>
       <View style={s.cvTop}>
         <TouchableOpacity onPress={onBack}><Ionicons name="chevron-back" size={28} color={C.accent} /></TouchableOpacity>
         <TouchableOpacity style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => setSet(true)}>
@@ -1759,105 +1832,7 @@ function ClubsScreen({ me, onClose }) {
   );
 }
 
-const MODS = [
-  ['Renk', [['Stok', ''], ['Mat siyah', 'matte black paint'], ['Beyaz', 'pearl white paint'], ['Kırmızı', 'candy red paint'], ['Mavi', 'metallic blue paint'], ['Mat gri', 'matte grey wrap'], ['Turuncu', 'orange paint'], ['Yeşil', 'racing green paint']]],
-  ['Jant', [['Stok', ''], ['Siyah jant', 'black alloy wheels'], ['Altın jant', 'gold forged wheels'], ['Büyük krom', 'large chrome wheels']]],
-  ['Gövde kiti', [['Stok', ''], ['Geniş kasa', 'wide body kit'], ['Spoyler', 'big rear wing spoiler'], ['Karbon parça', 'carbon fiber aero parts']]],
-  ['Duruş', [['Stok', ''], ['Alçaltılmış', 'lowered stance'], ['Yükseltilmiş', 'lifted off-road stance']]],
-  ['Ortam', [['Aynı kalsın', ''], ['Gün batımı yol', 'on a coastal road at sunset'], ['Gece şehir', 'in a neon city at night'], ['Pist', 'on a race track'], ['Stüdyo', 'in a clean photo studio']]],
-];
-const SHARED = CFG.AI_KEY || '', AI_DAILY = CFG.AI_DAILY || 8, AIU = '@apexdrive_aiuse';
-const AIK = '@apexdrive_aikey';
-let AIM = null;
-async function aiModel(key) {
-  if (AIM) return AIM;
-  const j = await (await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } })).json();
-  if (j.error) { const e = new Error(j.error.message || 'anahtar'); e.code = j.error.code; throw e; }
-  const ok = (j.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent') && /image/i.test(m.name) && !/imagen/i.test(m.name));
-  const pick = ok.find((m) => /flash/i.test(m.name) && !/preview/i.test(m.name)) || ok.find((m) => /flash/i.test(m.name)) || ok[0];
-  if (!pick) throw new Error('Bu anahtar için görsel düzenleme modeli bulunamadı.');
-  AIM = pick.name.replace('models/', '');
-  return AIM;
-}
-async function aiEdit(key, b64, prompt) {
-  const model = await aiModel(key);
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: b64 } }] }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'] } }) });
-  const j = await r.json();
-  if (!r.ok) { const e = new Error((j.error && j.error.message) || 'hata'); e.code = r.status; throw e; }
-  const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
-  const im = parts.find((p) => p.inlineData || p.inline_data);
-  if (!im) throw new Error((parts.find((p) => p.text) || {}).text || 'Görsel üretilemedi.');
-  const d = im.inlineData || im.inline_data;
-  return { mime: d.mimeType || d.mime_type || 'image/png', data: d.data };
-}
-const aiErr = (e) => (e.code === 400 && /key/i.test(e.message) ? 'Anahtar geçersiz görünüyor. Kontrol edip yeniden gir.' : e.code === 403 ? 'Bu anahtarla görsel düzenlemeye izin yok (ya da bölge kısıtı var).' : e.code === 429 ? 'Ücretsiz kota doldu. Biraz bekleyip tekrar dene (kota Google tarafından belirlenir).' : String(e.message || 'Bir sorun oluştu').slice(0, 160));
-function ModStudio({ me, onClose }) {
-  const [key, setKey] = useState(null), [kin, setKin] = useState(''), [sel, setSel] = useState({}), [extra, setExtra] = useState(''), [orig, setOrig] = useState(null), [res, setRes] = useState(null), [busy, setBusy] = useState(false), [err, setErr] = useState(''), [after, setAfter] = useState(true), [used, setUsed] = useState(0);
-  const car = me.car || {}, word = car.vtype === 'moto' ? 'motorcycle' : 'car';
-  useEffect(() => {
-    if (SHARED) { setKey(SHARED); AsyncStorage.getItem(AIU).then((v) => { const u = v ? JSON.parse(v) : {}; setUsed(u.d === new Date().toDateString() ? u.n : 0); }).catch(() => {}); return; }
-    AsyncStorage.getItem(AIK).then((v) => setKey(v || '')).catch(() => setKey(''));
-  }, []);
-  const saveKey = () => { const k = kin.trim(); if (k.length < 20) return AlertX.alert('Anahtar eksik', 'Google AI Studio anahtarının tamamını yapıştır.'); AIM = null; AsyncStorage.setItem(AIK, k).catch(() => {}); setKey(k); };
-  const pick = async () => {
-    try {
-      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.6, base64: true });
-      if (r.canceled) return;
-      if (r.assets[0].base64.length > 6e6) return AlertX.alert('Fotoğraf çok büyük', 'Daha küçük bir fotoğraf seç.');
-      setOrig(r.assets[0].base64); setRes(null); setErr('');
-    } catch { AlertX.alert('Fotoğraf seçilemedi', 'Galeri iznini kontrol et.'); }
-  };
-  const run = async () => {
-    const parts = MODS.map(([k, o]) => o[sel[k] || 0][1]).filter(Boolean);
-    if (!orig) return AlertX.alert('Önce fotoğraf seç', `Düzenlenecek ${word === 'car' ? 'araç' : 'motor'} fotoğrafını ekle.`);
-    if (!parts.length && !extra.trim()) return AlertX.alert('Bir değişiklik seç', 'Renk, jant gibi bir seçenek seç ya da ek istek yaz.');
-    if (SHARED && used >= AI_DAILY) return AlertX.alert('Günlük hakkın bitti', 'Bugün için tüm düzenleme haklarını kullandın. Yarın tekrar dene.');
-    setBusy(true); setErr('');
-    try {
-      const prompt = `Edit this photo of a ${word}. Keep the same ${word}, camera angle, framing and number plate; change only what is requested. Apply: ${parts.join(', ')}${extra.trim() ? '. ' + extra.trim() : ''}. Photorealistic, natural lighting and reflections.`;
-      setRes(await aiEdit(key, orig, prompt)); setAfter(true);
-      if (SHARED) { const n = used + 1; setUsed(n); AsyncStorage.setItem(AIU, JSON.stringify({ d: new Date().toDateString(), n })).catch(() => {}); }
-    } catch (e) { setErr(aiErr(e)); }
-    setBusy(false);
-  };
-  const share = async () => { try { const f = FileSystem.cacheDirectory + 'apex-mod.png'; await FileSystem.writeAsStringAsync(f, res.data, { encoding: FileSystem.EncodingType.Base64 }); await Sharing.shareAsync(f); } catch { AlertX.alert('Paylaşılamadı', 'Görsel kaydedilemedi.'); } };
-  const shown = res && after ? `data:${res.mime};base64,${res.data}` : orig ? `data:image/jpeg;base64,${orig}` : null;
-  return (
-    <Modal visible animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={s.root}>
-        <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Modifiye (AI)</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
-          {key === null ? <ActivityIndicator color={C.accent} /> : !key ? (
-            <View style={[s.card, { flexBasis: undefined }]}>
-              <Text style={s.itemTitle}>Google AI anahtarı gerekli</Text>
-              <Text style={[s.itemSub, { marginTop: 6 }]}>Fotoğrafını düzenleyen yapay zeka için kendi ücretsiz Google AI Studio anahtarını kullanırsın. Kota sana ait olur, anahtar sadece bu telefonda saklanır.{'\n\n'}1) Aşağıdaki düğmeden siteyi aç{'\n'}2) Google hesabınla gir, "Create API key" de{'\n'}3) Anahtarı kopyalayıp buraya yapıştır</Text>
-              <TouchableOpacity style={[s.btn, { backgroundColor: C.line }]} onPress={() => Linking.openURL('https://aistudio.google.com/apikey')}><Text style={[s.btnText, { color: C.text }]}>Anahtar al</Text></TouchableOpacity>
-              <TextInput style={s.input} value={kin} onChangeText={setKin} placeholder="Anahtarı yapıştır" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} />
-              <TouchableOpacity style={s.btn} onPress={saveKey}><Text style={s.btnText}>Kaydet</Text></TouchableOpacity>
-            </View>
-          ) : (
-            <View>
-              <Text style={s.itemSub}>{car.brand} {car.model} {car.year}{SHARED ? `  ·  Bugün kalan hak: ${Math.max(0, AI_DAILY - used)}` : ''}</Text>
-              <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 12 }]} onPress={pick}><Text style={[s.btnText, { color: C.accent }]}>{orig ? 'Fotoğrafı değiştir' : 'Fotoğraf seç'}</Text></TouchableOpacity>
-              {shown && <Image source={{ uri: shown }} style={{ width: '100%', aspectRatio: 4 / 3, borderRadius: 24, marginTop: 12, backgroundColor: C.card }} resizeMode="contain" />}
-              {res && <View style={{ alignItems: 'center' }}><Chips opts={[['Önce', false], ['Sonra', true]]} val={after} onPick={setAfter} /></View>}
-              {MODS.map(([k, o]) => (<View key={k}><Text style={[s.itemSub, { marginTop: 14 }]}>{k}</Text><Chips opts={o.map(([l], i) => [l, i])} val={sel[k] || 0} onPick={(i) => setSel({ ...sel, [k]: i })} /></View>))}
-              <TextInput style={s.input} value={extra} onChangeText={setExtra} placeholder="Ek istek (ör. mat siyah kaput, neon altı)" placeholderTextColor={C.dim} />
-              <TouchableOpacity style={s.btn} onPress={run} disabled={busy}><Text style={s.btnText}>{busy ? 'Düzenleniyor...' : 'Düzenle'}</Text></TouchableOpacity>
-              {busy && <ActivityIndicator color={C.accent} style={{ marginTop: 12 }} />}
-              {!!err && <Text style={[s.hint, { color: '#FF6B6B' }]}>{err}</Text>}
-              {res && !busy && <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={share}><Text style={[s.btnText, { color: C.accent }]}>Sonucu paylaş</Text></TouchableOpacity>}
-              {!SHARED && <TouchableOpacity onPress={() => { AsyncStorage.removeItem(AIK).catch(() => {}); AIM = null; setKey(''); }}><Text style={[s.hint, { color: C.accent }]}>Anahtarı sil</Text></TouchableOpacity>}
-              <Text style={s.hint}>Sonuç yapay zeka yorumudur, birebir gerçek olmayabilir. Ücretsiz kotanın sınırını Google belirler.</Text>
-            </View>
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    </Modal>
-  );
-}
-
-function SettingsModal({ prefs, setPrefs, onClose, autoCheck, onOpenMod }) {
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
@@ -1908,9 +1883,6 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, onOpenMod }) {
             <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
             {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
           </Box>
-          <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={onOpenMod}>
-            <Ionicons name="color-wand" size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Modifiye (AI)</Text><Ionicons name="chevron-forward" size={20} color={C.dim} />
-          </TouchableOpacity>
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -2113,9 +2085,10 @@ function AppInner() {
   const [friends, setFriends] = useState([]);
   const [shareTrip, setShareTrip] = useState(null);
   useEffect(() => { if (profile) ensureProfile(profile); }, [profile?.username]);
-  const [vdocs, setVdocs] = useState({});
+  const [docsBy, setDocsBy] = useState({});
   const [rem, setRem] = useState({ start: 30, freq: 1, hour: 9 });
-  const vLoaded = useRef(false);
+  const vLoaded = useRef(false), vidRef = useRef('v0');
+  const vehicles = (profile && profile.vehicles) || [];
   const [trips, setTrips] = useState([]);
   const [regions, setRegions] = useState({});
   const [cur, setCur] = useState(null);
@@ -2128,7 +2101,7 @@ function AppInner() {
   useEffect(() => {
     AsyncStorage.getItem(KEY).then((v) => v && setTrips(JSON.parse(v))).catch(() => {});
     AsyncStorage.getItem(FKEY).then((v) => v && setFriends(JSON.parse(v))).catch(() => {});
-    AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? JSON.parse(v) : null)).catch(() => setProfile(null));
+    AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
     AsyncStorage.getItem(RKEY).then((v) => { if (v) { regionsRef.current = JSON.parse(v); setRegions(regionsRef.current); } }).catch(() => {});
     Location.requestForegroundPermissionsAsync().catch(() => {});
     onTick = () => {
@@ -2184,6 +2157,7 @@ function AppInner() {
   };
 
   const start = async () => {
+    vidRef.current = (profile && profile.vid) || 'v0';
     const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
     await Location.requestBackgroundPermissionsAsync().catch(() => {});
@@ -2209,7 +2183,7 @@ function AppInner() {
     const d = R, duration = (Date.now() - d.t0) / 1000;
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
-    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000) };
+    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: vidRef.current };
     const n = [t, ...trips];
     setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     setTab('profile');
@@ -2217,7 +2191,7 @@ function AppInner() {
   };
 
   useEffect(() => { if (profile && trips.length) Promise.resolve(ensureProfile(profile)).then(() => syncProfile(profile, trips)); }, [profile, trips.length]);
-  const saveProfile = (p) => { setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
+  const saveProfile = (p0) => { const p = initGarage(p0); setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
   const pickAvatar = async () => {
     try {
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1] });
@@ -2262,14 +2236,14 @@ function AppInner() {
   const cells = useMemo(() => [...new Set([...cellStore, ...cellsOf([route])])], [cellStore, route]);
   const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
   useEffect(() => {
-    AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setVdocs(j.docs || {}); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
+    AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
   }, []);
   useEffect(() => {
     if (!vLoaded.current) return;
-    AsyncStorage.setItem(VKEY, JSON.stringify({ docs: vdocs, rem })).catch(() => {});
-    const id = setTimeout(() => scheduleReminders(vdocs, rem), 800);
+    AsyncStorage.setItem(VKEY, JSON.stringify({ by: docsBy, rem })).catch(() => {});
+    const id = setTimeout(() => scheduleReminders(docsBy, rem, vehicles), 800);
     return () => clearTimeout(id);
-  }, [vdocs, rem]);
+  }, [docsBy, rem, vehicles.length]);
   useEffect(() => { if (pReady) scheduleDaily(prefs, trips); }, [pReady, prefs.daily, trips.length]);
   useEffect(() => {
     if (!pReady) return;
@@ -2296,6 +2270,20 @@ function AppInner() {
   if (profile === undefined) return <View style={s.root} />;
   if (profile === null) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
   if (!profile.car) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome existing={profile} onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
+  const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
+  const selectVehicle = (id) => saveProfile(pickVehicle(profile, id));
+  const addVehicle = (v) => saveProfile(withVehicle(profile, v));
+  const removeVehicle = (id) => {
+    if (vehicles.length < 2) return AlertX.alert('Silinemez', 'En az bir aracın olmalı.');
+    const v = vehicles.find((x) => x.id === id);
+    if (!v) return;
+    const n = trips.filter((t) => (t.veh || 'v0') === id).length;
+    AlertX.alert('Araç silinsin mi?', `${v.brand} ${v.model}${n ? ` ve ${n} sürüşü silinecek.` : ' silinecek.'}`, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => {
+      saveProfile(dropVehicle(profile, id));
+      setTrips((p) => { const nt = p.filter((t) => (t.veh || 'v0') !== id); AsyncStorage.setItem(KEY, JSON.stringify(nt)).catch(() => {}); return nt; });
+      setDocsBy((p) => { const nd = { ...p }; delete nd[id]; return nd; });
+    } }]);
+  };
   const TABS = [['drive', 'speedometer', 'Sürüş'], ['map', 'map', 'Harita'], ['board', 'trophy', 'Sıralama'], ['vehicle', 'car-sport', 'Araç'], ['profile', 'person', 'Profil']];
   return (
     <SafeAreaProvider>
@@ -2307,10 +2295,10 @@ function AppInner() {
         </View>
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
-          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
+          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
-          {tab === 'vehicle' && <VehicleTab me={profile} docs={vdocs} setDocs={setVdocs} rem={rem} setRem={setRem} />}
-          {tab === 'profile' && <Profile me={profile} trips={trips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
+          {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
+          {tab === 'profile' && <Profile me={profile} trips={vTrips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
         <View style={s.navWrap} pointerEvents="box-none">
           <View style={s.pill}>
@@ -2340,9 +2328,8 @@ function AppInner() {
           </View>
         </Modal>
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
-        {screen === 'mod' && <ModStudio me={profile} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
-        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} onOpenMod={() => { setSettingsOpen(false); setAutoUpd(false); setScreen('mod'); }} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
@@ -2431,7 +2418,10 @@ const mk = () => StyleSheet.create({
   terr: { position: 'absolute', top: 64, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#1C1C21EE', borderRadius: 32, paddingVertical: 8, paddingHorizontal: 14 },
   tav: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#5A2D25', alignItems: 'center', justifyContent: 'center' },
   tavT: { color: C.text, fontWeight: '800' },
-  tname: { color: C.text, fontSize: 18, fontWeight: '800', letterSpacing: 1 },
+  tname: { color: C.text, fontSize: 15, fontWeight: '800', letterSpacing: 0.5, flexShrink: 1 },
+  tsub: { color: C.dim, fontSize: 11 },
+  gCard: { width: 150, backgroundColor: C.card, borderRadius: 24, padding: 14, gap: 4, borderWidth: 2, borderColor: 'transparent' },
+  gAdd: { borderStyle: 'dashed', borderColor: C.line, alignItems: 'center', justifyContent: 'center' },
   tkm: { color: C.text, fontSize: 16, fontWeight: '700' },
   pAv: { width: 54, height: 54, borderRadius: 27, backgroundColor: C.card, borderWidth: 2, borderColor: C.line, alignItems: 'center', justifyContent: 'center', marginVertical: 6 },
   pLetter: { color: C.accent, fontSize: 20, fontWeight: '800' },
