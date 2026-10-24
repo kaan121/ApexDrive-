@@ -23,8 +23,9 @@ jobs:
       - run: node -e "const j=require('./app.json');j.expo.android.versionCode=${{ github.run_number }};require('fs').writeFileSync('app.json',JSON.stringify(j,null,2))"
       - run: npx expo prebuild --platform android --no-install
       - run: cd android && ./gradlew assembleRelease
+      - run: cp android/app/build/outputs/apk/release/app-release.apk ApexDrive.apk
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: ApexDrive ${{ github.run_number }}
-          files: android/app/build/outputs/apk/release/app-release.apk
+          files: ApexDrive.apk
