@@ -8,6 +8,7 @@ import * as BackgroundTask from 'expo-background-task';
 import { Audio } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as MediaLibrary from 'expo-media-library';
+import * as CFG from './config';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { GH_REPO, BUILD } from './repo';
 import * as RP from './repo';
@@ -28,7 +29,7 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: '#2E4545' };
 const LIGHT = { bg: '#F2F2F7', card: '#FFFFFF', line: '#D8D8DE', text: '#111114', dim: '#6B6B75', accent: '#2A9D9D', warn: '#E68600', sel: '#CFE8E8' };
 let C = DARK, s = null, curTheme = '';
-const LKEY = '@apexdrive_launch', SKEY = '@apexdrive_settings', CKEY = '@apexdrive_cells', VKEY = '@apexdrive_vehicle', FKEY = '@apexdrive_friends', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
+const NKEY = '@apexdrive_news', LKEY = '@apexdrive_launch', SKEY = '@apexdrive_settings', CKEY = '@apexdrive_cells', VKEY = '@apexdrive_vehicle', FKEY = '@apexdrive_friends', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
 
 const hav = (a, b) => {
   const R = 6371, r = Math.PI / 180;
@@ -753,24 +754,51 @@ function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
   );
 }
 
-function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pickPhoto, delPhoto, onPan }) {
+const placeCache = { lat: 0, lon: 0, v: null };
+async function placeOf(lat, lon) {
+  try {
+    if (placeCache.v && hav({ latitude: lat, longitude: lon }, { latitude: placeCache.lat, longitude: placeCache.lon }) < 2) return placeCache.v;
+    const [a] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+    const v = { d: (a && (a.subregion || a.city || a.district)) || '', c: (a && a.region) || '' };
+    placeCache.lat = lat; placeCache.lon = lon; placeCache.v = v;
+    return v;
+  } catch { return { d: '', c: '' }; }
+}
+// Yakınlık: aynı ilçe / aynı il (yer bilgisi yoksa 25 km)
+const inScope = (p, my, scope, me) => {
+  const d = hav({ latitude: p.lat, longitude: p.lon }, me);
+  if (!p.loc || !p.loc.c || !my || !my.c) return d <= 25;
+  return scope === 'ilce' ? (!!p.loc.d && p.loc.d === my.d) || d <= 3 : p.loc.c === my.c || d <= 25;
+};
+function MapTab({ route, cells, on, region, regions, name, profile, totalKm, prefs, setPrefs, pickPhoto, delPhoto, onPan }) {
   const [me, setMe] = useState(null);
   const [seen, setSeen] = useState(false);
   const [mode, setMode] = useState('cells');
   useBack(mode !== 'cells', () => setMode('cells'));
   const [sat, setSat] = useState(false);
-  const [people, setPeople] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false), [myst, setMyst] = useState(false);
+  const [all, setAll] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false), [myst, setMyst] = useState(false), [scope, setScope] = useState('il'), [myPlace, setMyPlace] = useState(null);
+  const people = me ? all.filter((p) => inScope(p, myPlace, scope, me)) : [];
+  useEffect(() => { if (me && !myPlace) placeOf(me.latitude, me.longitude).then(setMyPlace); }, [!!me]);
+  useEffect(() => {
+    if (mode !== 'stories' || prefs.visible) return;
+    AsyncStorage.getItem('@apexdrive_visasked').then((v) => {
+      if (v) return;
+      AsyncStorage.setItem('@apexdrive_visasked', '1').catch(() => {});
+      AlertX.alert('Yakındakiler seni görsün mü?', 'Açarsan aynı ilçe/ildeki sürücüler seni Hikayeler çubuğunda ve haritada görür. Konumun yaklaşık (≈1 km) paylaşılır. Ayarlar\'dan istediğin zaman kapatabilirsin.', [{ text: 'Hayır', style: 'cancel' }, { text: 'Görünür ol', onPress: () => setPrefs({ ...prefs, visible: true }) }]);
+    }).catch(() => {});
+  }, [mode]);
   useEffect(() => {
     if (mode !== 'stories' || !online || !me) return;
     const load = async () => {
       try {
-        const b = `lat=gte.${me.latitude - 0.5}&lat=lte.${me.latitude + 0.5}&lon=gte.${me.longitude - 0.5}&lon=lte.${me.longitude + 0.5}`;
-        const pr = await (await api(`presence?${b}&updated_at=gte.${new Date(Date.now() - 900000).toISOString()}&select=username,lat,lon`)).json();
-        const st = await (await api(`stories?${b}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&select=username,lat,lon`)).json();
+        const b = `lat=gte.${me.latitude - 1.2}&lat=lte.${me.latitude + 1.2}&lon=gte.${me.longitude - 1.2}&lon=lte.${me.longitude + 1.2}`;
+        const pr = await (await api(`presence?${b}&updated_at=gte.${new Date(Date.now() - 900000).toISOString()}&select=username,lat,lon,car`)).json();
+        const st = await (await api(`stories?${b}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&select=username,lat,lon,caption`)).json();
+        const parse = (c) => { try { const j = JSON.parse(c); return j && typeof j === 'object' ? j : {}; } catch { return {}; } };
         const m = {};
-        (Array.isArray(pr) ? pr : []).forEach((p) => { m[p.username] = { u: p.username, lat: p.lat, lon: p.lon, s: 0 }; });
-        (Array.isArray(st) ? st : []).forEach((p) => { m[p.username] = { ...(m[p.username] || { u: p.username, lat: p.lat, lon: p.lon }), s: 1 }; });
-        setPeople(Object.values(m));
+        (Array.isArray(pr) ? pr : []).forEach((p) => { const j = parse(p.car); m[p.username] = { u: p.username, lat: p.lat, lon: p.lon, s: 0, loc: { d: j.d, c: j.c } }; });
+        (Array.isArray(st) ? st : []).forEach((p) => { const loc = unpackCap(p.caption).loc; m[p.username] = { ...(m[p.username] || { u: p.username, lat: p.lat, lon: p.lon, loc }), s: 1, ...(loc ? { loc } : {}) }; });
+        setAll(Object.values(m));
       } catch {}
     };
     load(); const id = setInterval(load, 30000); return () => clearInterval(id);
@@ -784,15 +812,31 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pic
   useEffect(() => { if (me && !seen) { setSeen(true); onPan(me.latitude, me.longitude); } }, [me]);
   return (
     <View style={s.map}>
-      <LeafletMap style={s.map} route={mode === 'route' ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} sat={sat} people={mode === 'stories' ? people : EMPTY} onPerson={setPerson} />
+      <LeafletMap style={s.map} route={mode === 'cells' && on ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} sat={sat} people={mode === 'stories' ? people : EMPTY} onPerson={setPerson} />
       {mode === 'photos' && <PhotosView regions={regions} cur={region} pickPhoto={pickPhoto} delPhoto={delPhoto} />}
       <View style={s.seg}>
-        {[['route', 'Rota'], ['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım'], ['stories', 'Hikayeler']].map(([k, l]) => (
+        {[['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım'], ['stories', 'Hikayeler']].map(([k, l]) => (
           <TouchableOpacity key={k} style={[s.segBtn, mode === k && s.segActive]} onPress={() => setMode(k)}>
             <Text style={[s.segText, mode === k && { color: C.text }]}>{l}</Text>
           </TouchableOpacity>
         ))}
       </View>
+      {mode === 'stories' && online && (
+        <View style={s.nbBar}>
+          <View style={{ gap: 6 }}>
+            {[['ilce', 'İlçe'], ['il', 'İl']].map(([k, l]) => <TouchableOpacity key={k} style={[s.nbPill, scope === k && { backgroundColor: C.accent }]} onPress={() => setScope(k)}><Text style={{ color: scope === k ? '#06101F' : C.text, fontWeight: '700', fontSize: 12 }}>{l}</Text></TouchableOpacity>)}
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, alignItems: 'center', paddingRight: 8 }}>
+            {people.length === 0 && <Text style={[s.itemSub, { maxWidth: 230 }]}>Yakında kimse görünmüyor. Arkadaşların Ayarlar'dan "Yakındakilere görün"ü açmalı.</Text>}
+            {people.map((p) => (
+              <TouchableOpacity key={p.u} style={{ alignItems: 'center', width: 62 }} onPress={() => setPerson(p.u)}>
+                <View style={[s.nbAv, { borderColor: p.s ? '#FF2D55' : C.accent }]}><Text style={s.pLetter}>{p.u[0].toUpperCase()}</Text></View>
+                <Text style={s.nbName} numberOfLines={1}>{p.u}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
       {mode === 'stories' && (online ? (
         <View style={s.stBar}>
           <TouchableOpacity style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => setMyst(true)}><Ionicons name="albums" size={22} color={C.accent} /><Text style={s.itemTitle}>Hikayelerim</Text></TouchableOpacity>
@@ -1189,7 +1233,7 @@ function StoryViewer({ story, me, mine, onClose, onDeleted }) {
       <View style={{ flex: 1, backgroundColor: '#000' }}>
         <Image source={{ uri: story.img }} style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }} resizeMode="contain" />
         <View style={s.svTop}>
-          <Text style={{ color: '#fff', fontWeight: '700' }}>{mine ? 'Hikayen' : ''}</Text>
+          <Text style={{ color: '#fff', fontWeight: '700' }}>{ub.loc && (ub.loc.d || ub.loc.c) ? `📍 ${[ub.loc.d, ub.loc.c].filter(Boolean).join(', ')}` : mine ? 'Hikayen' : ''}</Text>
           <TouchableOpacity onPress={onClose}><Ionicons name="close" size={30} color="#fff" /></TouchableOpacity>
         </View>
         <View style={s.svCap}>
@@ -1319,19 +1363,24 @@ function Intro({ onDone }) {
 
 // ---- Müzik (iTunes önizleme) ----
 const MARK = '\u2063\u266B';
-const packCap = (cap, m) => (m ? `${cap}${MARK}${JSON.stringify(m)}` : cap);
+const packCap = (cap, m, loc) => (m || (loc && (loc.d || loc.c)) ? `${cap}${MARK}${JSON.stringify({ v: 2, m: m || null, loc: loc || null })}` : cap);
 const unpackCap = (c) => {
   const x = String(c || ''), i = x.indexOf(MARK);
-  if (i < 0) return { text: x, music: null };
-  try { return { text: x.slice(0, i), music: JSON.parse(x.slice(i + MARK.length)) }; } catch { return { text: x.slice(0, i), music: null }; }
+  if (i < 0) return { text: x, music: null, loc: null };
+  try {
+    const j = JSON.parse(x.slice(i + MARK.length));
+    if (j && j.v === 2) return { text: x.slice(0, i), music: j.m || null, loc: j.loc || null };
+    return { text: x.slice(0, i), music: j, loc: null };
+  } catch { return { text: x.slice(0, i), music: null, loc: null }; }
 };
+const AUD_TOKEN = CFG.AUDIUS_TOKEN || '';
 const sfx = { s: null };
 async function stopClip() { try { if (sfx.s) await sfx.s.unloadAsync(); } catch {} sfx.s = null; }
 async function playClip(url, start, len = 15) {
   await stopClip();
   try { await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true }); } catch {}
   try {
-    const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true, positionMillis: start * 1000 });
+    const { sound } = await Audio.Sound.createAsync({ uri: url, ...(AUD_TOKEN && String(url).includes('api.audius.co') ? { headers: { Authorization: `Bearer ${AUD_TOKEN}` } } : {}) }, { shouldPlay: true, positionMillis: start * 1000 });
     sfx.s = sound;
     sound.setOnPlaybackStatusUpdate((st) => { if (st.isLoaded && st.positionMillis >= (start + len) * 1000) sound.setPositionAsync(start * 1000).catch(() => {}); });
     return true;
@@ -1348,60 +1397,44 @@ async function ensureAudioPerm() {
 }
 const big = (u) => String(u || '').replace('100x100', '600x600');
 const fmtT = (x) => `${Math.floor(x / 60)}:${String(Math.floor(x % 60)).padStart(2, '0')}`;
-async function fetchLyrics(title, artist) {
-  try {
-    const j = await (await fetch(`https://lrclib.net/api/search?track_name=${encodeURIComponent(title)}&artist_name=${encodeURIComponent(artist)}`)).json();
-    const r = Array.isArray(j) ? j.find((x) => x.plainLyrics || x.syncedLyrics) : null;
-    if (!r) return [];
-    const raw = r.plainLyrics || String(r.syncedLyrics).replace(/\[[^\]]*\]/g, '');
-    return raw.split('\n').map((x) => x.trim()).filter(Boolean);
-  } catch { return null; }
-}
 const waveBars = (seed, n = 52) => {
   let h = 7; for (const c of String(seed)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   const out = []; let prev = 0.5;
   for (let i = 0; i < n; i++) { h = (h * 1664525 + 1013904223) >>> 0; prev = 0.25 + 0.75 * (0.5 * prev + 0.5 * (h / 4294967296)); out.push(prev); }
   return out;
 };
-function Wave({ seed, start, len, total = 30, onChange, onEnd }) {
-  const W = Dimensions.get('window').width - 40, bars = useMemo(() => waveBars(seed), [seed]);
+// Şarkının tamamını gösterir; kutu sabit, şerit kayar (Instagram gibi)
+function Wave({ seed, total, start, len, onChange, onEnd }) {
+  const W = Dimensions.get('window').width - 40, pps = 14;
+  const bars = useMemo(() => waveBars(seed, Math.max(1, Math.ceil(total))), [seed, total]);
   const g = useRef({ s0: 0 }).current, P = useRef({});
-  P.current = { start, len, onChange, onEnd };
+  P.current = { start, len, total, onChange, onEnd };
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: () => { g.s0 = P.current.start; },
-    onPanResponderMove: (e, gs) => { const n = Math.max(0, Math.min(total - P.current.len, g.s0 + (gs.dx / W) * total)); P.current.onChange(Math.round(n * 2) / 2); },
+    onPanResponderMove: (e, gs) => { const n = Math.max(0, Math.min(P.current.total - P.current.len, g.s0 - gs.dx / pps)); P.current.onChange(Math.round(n * 2) / 2); },
     onPanResponderRelease: () => P.current.onEnd(),
   })).current;
-  const left = (start / total) * W, wd = (len / total) * W;
+  const wl = (W - len * pps) / 2;
   return (
-    <View style={{ width: W, height: 64, justifyContent: 'center' }} {...pan.panHandlers}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', height: 48, gap: 3 }}>
-        {bars.map((b, i) => { const x = (i / bars.length) * W, inside = x >= left - 2 && x <= left + wd; return <View key={i} style={{ flex: 1, height: 8 + b * 36, borderRadius: 3, backgroundColor: inside ? '#fff' : '#ffffff55' }} />; })}
+    <View style={{ width: W, height: 64, overflow: 'hidden', justifyContent: 'center' }} {...pan.panHandlers}>
+      <View style={{ position: 'absolute', left: wl - start * pps, flexDirection: 'row', alignItems: 'center', height: 48 }}>
+        {bars.map((b, i) => <View key={i} style={{ width: pps - 3, marginHorizontal: 1.5, height: 8 + b * 36, borderRadius: 3, backgroundColor: i >= start - 0.5 && i < start + len ? '#fff' : '#ffffff55' }} />)}
       </View>
-      <View pointerEvents="none" style={{ position: 'absolute', left, width: wd, top: 2, bottom: 2, borderRadius: 12, borderWidth: 3, borderColor: '#FFB02E' }} />
+      <View pointerEvents="none" style={{ position: 'absolute', left: wl, width: len * pps, top: 2, bottom: 2, borderRadius: 12, borderWidth: 3, borderColor: '#FFB02E' }} />
     </View>
   );
 }
-const LYS = { ly1: { fs: 26, fw: '800', ta: 'center' }, ly2: { fs: 21, fw: '600', mono: true, ta: 'left' }, ly3: { fs: 30, fw: '800', fi: 'italic', ta: 'center' }, ly4: { fs: 24, fw: '900', up: true, ta: 'center' } };
 function MusicSticker({ m }) {
-  const st = m.style || 'label', col = m.color || '#FFFFFF';
-  if (st.startsWith('ly') && m.lyrics && m.lyrics.length) {
-    const c = LYS[st] || LYS.ly1;
-    return (
-      <View style={{ maxWidth: 300 }}>
-        {m.lyrics.map((l, i) => <Text key={i} style={{ color: col, fontSize: c.fs, fontWeight: c.fw, fontStyle: c.fi, fontFamily: c.mono ? Platform.select({ ios: 'Menlo', android: 'monospace' }) : undefined, textAlign: c.ta, textShadowColor: '#0008', textShadowRadius: 6, marginBottom: 2 }}>{c.up ? l.toUpperCase() : l}</Text>)}
-      </View>
-    );
-  }
-  if (st === 'only') return <Text style={{ color: '#fff', fontSize: 28, textShadowColor: '#0008', textShadowRadius: 6 }}>Sadece Müzik</Text>;
-  if (st === 'album') return <View style={{ alignItems: 'center' }}><Image source={{ uri: big(m.art) }} style={{ width: 220, height: 220, borderRadius: 8 }} /><Text style={s.msT}>{m.title}</Text><Text style={s.msA}>{m.artist}</Text></View>;
+  const st = m.style || 'label', col = m.color || '#FFFFFF', sh = { textShadowColor: '#0008', textShadowRadius: 6 };
+  if (st === 'only') return <Text style={{ color: col, fontSize: 28, ...sh }}>Sadece Müzik</Text>;
+  if (st === 'album') return <View style={{ alignItems: 'center' }}><Image source={{ uri: big(m.art) }} style={{ width: 220, height: 220, borderRadius: 8 }} /><Text style={[s.msT, { color: col }]}>{m.title}</Text><Text style={[s.msA, { color: col }]}>{m.artist}</Text></View>;
   if (st === 'vinyl') {
     return (
       <View style={{ alignItems: 'center' }}>
         <View style={s.vOut}><View style={s.vR1}><View style={s.vR2}><Image source={{ uri: big(m.art) }} style={s.vArt} /></View></View></View>
-        <Text style={s.msT}>{m.title}</Text><Text style={s.msA}>{m.artist}</Text>
+        <Text style={[s.msT, { color: col }]}>{m.title}</Text><Text style={[s.msA, { color: col }]}>{m.artist}</Text>
       </View>
     );
   }
@@ -1412,80 +1445,64 @@ function MusicSticker({ m }) {
     </View>
   );
 }
+async function searchSongs(src, q) {
+  if (src === 'full') {
+    const r = await fetch(`https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&limit=25&app_name=ApexDrive`, { headers: AUD_TOKEN ? { Authorization: `Bearer ${AUD_TOKEN}` } : {} });
+    if (!r.ok) throw new Error('audius ' + r.status);
+    const j = await r.json();
+    return (j.data || []).filter((t) => t.is_streamable !== false && t.duration > 20).map((t) => ({ key: 'a' + t.id, title: t.title, artist: (t.user && t.user.name) || '', art: t.artwork ? t.artwork['150x150'] || t.artwork['480x480'] || null : null, url: `https://api.audius.co/v1/tracks/${t.id}/stream?app_name=ApexDrive`, total: Math.floor(t.duration) }));
+  }
+  const j = await (await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=25&country=TR`)).json();
+  return (j.results || []).filter((x) => x.previewUrl).map((x) => ({ key: 'i' + x.trackId, title: x.trackName, artist: x.artistName, art: x.artworkUrl100, url: x.previewUrl, total: 30 }));
+}
 function MusicSheet({ onPick, onClose }) {
-  const [q, setQ] = useState(''), [res, setRes] = useState([]), [busy, setBusy] = useState(false), [sel, setSel] = useState(null), [err, setErr] = useState('');
+  const [q, setQ] = useState(''), [src, setSrc] = useState('pop'), [res, setRes] = useState([]), [busy, setBusy] = useState(false), [sel, setSel] = useState(null), [err, setErr] = useState('');
   useEffect(() => () => { stopClip(); }, []);
-  const search = async () => {
+  const search = async (s2 = src) => {
     if (!q.trim()) return;
     setBusy(true); setErr('');
     try {
-      const j = await (await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q.trim())}&media=music&entity=song&limit=25&country=TR`)).json();
-      const r = (j.results || []).filter((x) => x.previewUrl);
+      const r = await searchSongs(s2, q.trim());
       setRes(r); if (!r.length) setErr('Sonuç bulunamadı.');
-    } catch { setErr('Arama yapılamadı. İnternetini kontrol et.'); }
+    } catch { setErr(s2 === 'full' ? 'Tam şarkı kaynağı şu an yanıt vermedi. Biraz sonra dene ya da Popüler\'i seç.' : 'Arama yapılamadı. İnternetini kontrol et.'); }
     setBusy(false);
   };
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
-        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, height: '78%' }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, height: '82%' }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Müzik ekle</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <View style={{ alignItems: 'flex-start' }}><Chips opts={[['Popüler (30 sn)', 'pop'], ['Tam şarkı', 'full']]} val={src} onPick={(v) => { setSrc(v); setRes([]); setSel(null); stopClip(); setErr(''); }} /></View>
+          <Text style={[s.itemSub, { marginVertical: 8 }]}>{src === 'full' ? 'Tam şarkılar Audius\'taki bağımsız sanatçılardan gelir, popüler hit şarkıların çoğu yoktur. Şarkının tamamından kısım seçebilirsin.' : 'Popüler şarkılar için yalnızca 30 saniyelik önizleme kullanılabilir.'}</Text>
           <View style={{ flexDirection: 'row', gap: 10 }}>
-            <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={q} onChangeText={setQ} onSubmitEditing={search} returnKeyType="search" placeholder="Şarkı veya sanatçı ara" placeholderTextColor={C.dim} />
-            <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={search}><Ionicons name="search" size={18} color="#06101F" /></TouchableOpacity>
+            <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={q} onChangeText={setQ} onSubmitEditing={() => search()} returnKeyType="search" placeholder="Şarkı veya sanatçı ara" placeholderTextColor={C.dim} />
+            <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={() => search()}><Ionicons name="search" size={18} color="#06101F" /></TouchableOpacity>
           </View>
           {busy && <ActivityIndicator color={C.accent} style={{ marginTop: 12 }} />}
           {!!err && <Text style={s.hint}>{err}</Text>}
-          <FlatList data={res} keyExtractor={(r) => String(r.trackId)} style={{ marginTop: 10 }} keyboardShouldPersistTaps="handled" renderItem={({ item }) => (
-            <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center' }, sel?.trackId === item.trackId && { borderWidth: 1, borderColor: C.accent }]} onPress={() => { setSel(item); playClip(item.previewUrl, 0, 15); }}>
-              <Image source={{ uri: item.artworkUrl100 }} style={{ width: 46, height: 46, borderRadius: 10, marginRight: 12 }} />
-              <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{item.trackName}</Text><Text style={s.itemSub} numberOfLines={1}>{item.artistName}</Text></View>
-              <Ionicons name={sel?.trackId === item.trackId ? 'volume-high' : 'play-circle'} size={26} color={C.accent} />
+          <FlatList data={res} keyExtractor={(r) => r.key} style={{ marginTop: 10 }} keyboardShouldPersistTaps="handled" renderItem={({ item }) => (
+            <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center' }, sel?.key === item.key && { borderWidth: 1, borderColor: C.accent }]} onPress={() => { setSel(item); playClip(item.url, 0, 15); }}>
+              {item.art ? <Image source={{ uri: item.art }} style={{ width: 46, height: 46, borderRadius: 10, marginRight: 12 }} /> : <View style={{ width: 46, height: 46, borderRadius: 10, marginRight: 12, backgroundColor: C.line }} />}
+              <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{item.title}</Text><Text style={s.itemSub} numberOfLines={1}>{item.artist} · {fmtT(item.total)}</Text></View>
+              <Ionicons name={sel?.key === item.key ? 'volume-high' : 'play-circle'} size={26} color={C.accent} />
             </TouchableOpacity>
           )} />
-          {sel && <TouchableOpacity style={s.btn} onPress={() => { stopClip(); onPick({ title: sel.trackName, artist: sel.artistName, art: sel.artworkUrl100, url: sel.previewUrl }); }}><Text style={s.btnText}>Seç</Text></TouchableOpacity>}
-        </View>
-      </View>
-    </Modal>
-  );
-}
-function LyricsPicker({ song, onDone, onClose }) {
-  const [lines, setLines] = useState(null), [sel, setSel] = useState([]), [own, setOwn] = useState('');
-  useEffect(() => { fetchLyrics(song.title, song.artist).then((r) => setLines(r === null ? 'err' : r)); }, []);
-  const toggle = (i) => setSel((p) => (p.includes(i) ? p.filter((x) => x !== i) : p.length < 6 ? [...p, i].sort((a, b) => a - b) : p));
-  const done = () => onDone(own.trim() ? own.trim().split('\n').slice(0, 6) : Array.isArray(lines) ? sel.map((i) => lines[i]) : []);
-  return (
-    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
-        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, height: '80%' }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Söz seç (en fazla 6 satır)</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
-          {lines === null && <ActivityIndicator color={C.accent} />}
-          {lines === 'err' && <Text style={s.hint}>Sözler alınamadı. İnternetini kontrol et ya da aşağıya kendin yaz.</Text>}
-          {Array.isArray(lines) && lines.length === 0 && <Text style={s.hint}>Bu şarkının sözü bulunamadı. Aşağıya kendin yazabilirsin.</Text>}
-          <FlatList data={Array.isArray(lines) ? lines : []} keyExtractor={(l, i) => String(i)} style={{ marginTop: 8 }} renderItem={({ item, index }) => (
-            <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 10 }, sel.includes(index) && { borderWidth: 1, borderColor: C.accent }]} onPress={() => toggle(index)}>
-              <View style={[s.chk, sel.includes(index) && { backgroundColor: C.accent, borderColor: C.accent }]}>{sel.includes(index) && <Ionicons name="checkmark" size={16} color="#06101F" />}</View>
-              <Text style={[s.itemTitle, { flex: 1 }]}>{item}</Text>
-            </TouchableOpacity>
-          )} />
-          <TextInput style={[s.input, { marginTop: 8, maxHeight: 90 }]} value={own} onChangeText={setOwn} placeholder="Ya da kendin yaz" placeholderTextColor={C.dim} multiline />
-          <TouchableOpacity style={s.btn} onPress={done}><Text style={s.btnText}>Ekle ({own.trim() ? own.trim().split('\n').slice(0, 6).length : sel.length})</Text></TouchableOpacity>
+          {sel && <TouchableOpacity style={s.btn} onPress={() => { stopClip(); onPick({ title: sel.title, artist: sel.artist, art: sel.art, url: sel.url, total: sel.total }); }}><Text style={s.btnText}>Seç</Text></TouchableOpacity>}
         </View>
       </View>
     </Modal>
   );
 }
 const PCOL = [...TCOLORS, '#FF2D55', '#00E5FF', '#76FF03', '#FFEA00'];
-const STY = [['only', 'ban'], ['ly4', 'AA'], ['ly2', 'AI'], ['ly1', 'Aa'], ['ly3', 'A'], ['label', 'pricetag'], ['album', 'square'], ['vinyl', 'disc']];
+const STY = [['only', 'ban'], ['label', 'pricetag'], ['album', 'square'], ['vinyl', 'disc']];
 function MusicEditor({ song, uri, init, onCancel, onDone }) {
-  const [start, setStart] = useState(init ? init.start : 0), [len, setLen] = useState(init ? init.len : 15), [style, setStyle] = useState(init ? init.style : 'label'), [color, setColor] = useState(init ? init.color : '#FFFFFF');
-  const [lyrics, setLyrics] = useState(init ? init.lyrics : []), [pal, setPal] = useState(false), [ly, setLy] = useState(false), [playing, setPlaying] = useState(true);
+  const total = song.total || 30;
+  const [len, setLen] = useState(Math.min(init ? init.len : 15, total)), [start, setStart] = useState(init ? init.start : 0), [style, setStyle] = useState(init ? init.style : 'label'), [color, setColor] = useState(init ? init.color : '#FFFFFF');
+  const [pal, setPal] = useState(false), [playing, setPlaying] = useState(true);
   useEffect(() => { playClip(song.url, start, len).then(setPlaying); return () => { stopClip(); }; }, []);
   const replay = (s0, l0) => playClip(song.url, s0, l0).then(setPlaying);
-  const m = { ...song, start, len, style, color, lyrics };
-  const pickStyle = (k) => { setStyle(k); if (k.startsWith('ly') && !lyrics.length) setLy(true); };
-  const cycle = () => { const nl = len === 15 ? 10 : len === 10 ? 5 : 15, ns = Math.min(start, 30 - nl); setLen(nl); setStart(ns); replay(ns, nl); };
-  const fin = () => { stopClip(); onDone({ ...m, style: style.startsWith('ly') && !lyrics.length ? 'label' : style }); };
+  const m = { ...song, start, len, style, color };
+  const cycle = () => { const nl = Math.min(len === 15 ? 10 : len === 10 ? 5 : 15, total), ns = Math.min(start, Math.max(0, total - nl)); setLen(nl); setStart(ns); replay(ns, nl); };
   return (
     <Modal visible animationType="slide" onRequestClose={onCancel}>
       <View style={{ flex: 1, backgroundColor: '#000' }}>
@@ -1495,31 +1512,25 @@ function MusicEditor({ song, uri, init, onCancel, onDone }) {
           <View style={s.meTop}>
             <TouchableOpacity onPress={() => { stopClip(); onCancel(); }}><Text style={s.meTxt}>İptal</Text></TouchableOpacity>
             <TouchableOpacity onPress={() => setPal(!pal)} style={[s.meColor, { backgroundColor: color }]}><Ionicons name="color-palette" size={20} color="#000" /></TouchableOpacity>
-            <TouchableOpacity onPress={fin}><Text style={s.meTxt}>Bitti</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => { stopClip(); onDone(m); }}><Text style={s.meTxt}>Bitti</Text></TouchableOpacity>
           </View>
           {pal && <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 54 }} contentContainerStyle={{ gap: 10, paddingHorizontal: 18, alignItems: 'center' }}>{PCOL.map((c) => <TouchableOpacity key={c} onPress={() => setColor(c)} style={[s.dot, { width: 34, height: 34, borderRadius: 17, backgroundColor: c, borderColor: color === c ? '#fff' : '#ffffff44' }]} />)}</ScrollView>}
-          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-            <MusicSticker m={m.style.startsWith('ly') && !lyrics.length ? { ...m, style: 'label' } : m} />
-            {style.startsWith('ly') && <TouchableOpacity style={[s.fpill, { marginTop: 18 }]} onPress={() => setLy(true)}><Ionicons name="text" size={16} color={C.text} /><Text style={s.navText}>{lyrics.length ? `Sözleri değiştir (${lyrics.length})` : 'Söz seç'}</Text></TouchableOpacity>}
-          </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 76, flexGrow: 0 }} contentContainerStyle={{ gap: 12, paddingHorizontal: 16, alignItems: 'center' }}>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}><MusicSticker m={m} /></View>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 14, marginBottom: 4 }}>
             {STY.map(([k, g]) => (
-              <TouchableOpacity key={k} onPress={() => pickStyle(k)} style={[s.meSty, style === k && { backgroundColor: '#fff' }]}>
-                {k.startsWith('ly') ? <Text style={{ color: style === k ? '#FF2D55' : '#fff', fontWeight: '900', fontStyle: k === 'ly3' ? 'italic' : 'normal', fontFamily: k === 'ly2' ? Platform.select({ ios: 'Menlo', android: 'monospace' }) : undefined, fontSize: 17 }}>{g}</Text> : <Ionicons name={g} size={24} color={style === k ? '#FF2D55' : '#fff'} />}
-              </TouchableOpacity>
+              <TouchableOpacity key={k} onPress={() => setStyle(k)} style={[s.meSty, style === k && { backgroundColor: '#fff' }]}><Ionicons name={g} size={24} color={style === k ? '#FF2D55' : '#fff'} /></TouchableOpacity>
             ))}
-          </ScrollView>
+          </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 14 }}>
             <TouchableOpacity onPress={cycle} style={s.meLen}><Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>{len}</Text></TouchableOpacity>
-            <Text style={{ color: '#fff', fontWeight: '700' }}>{fmtT(start)} – {fmtT(start + len)}</Text>
+            <Text style={{ color: '#fff', fontWeight: '700' }}>{fmtT(start)} – {fmtT(start + len)} / {fmtT(total)}</Text>
             <TouchableOpacity onPress={() => { if (playing) { stopClip(); setPlaying(false); } else replay(start, len); }} style={[s.meLen, { backgroundColor: '#fff', borderWidth: 0 }]}><Ionicons name={playing ? 'stop' : 'play'} size={20} color="#000" /></TouchableOpacity>
           </View>
           <View style={{ alignItems: 'center', marginTop: 10, marginBottom: 14 }}>
-            <Wave seed={song.title + song.artist} start={start} len={len} onChange={setStart} onEnd={() => replay(start, len)} />
-            <Text style={[s.hint, { color: '#ffffffaa' }]}>Çalacak kısmı seçmek için kutuyu sürükle</Text>
+            <Wave seed={song.title + song.artist} total={total} start={start} len={len} onChange={setStart} onEnd={() => replay(start, len)} />
+            <Text style={[s.hint, { color: '#ffffffaa' }]}>Şarkıyı kaydırarak çalacak kısmı seç</Text>
           </View>
         </SafeAreaView>
-        {ly && <LyricsPicker song={song} onClose={() => setLy(false)} onDone={(t) => { setLy(false); setLyrics(t); }} />}
       </View>
     </Modal>
   );
@@ -1555,7 +1566,7 @@ function Sticker({ children, x0, y0, onDrag, hit, onDrop }) {
   return <View {...pan.panHandlers} style={{ position: 'absolute', left: st.x, top: st.y, padding: 16, transform: [{ rotate: `${st.r}rad` }, { scale: st.s }] }}>{children}</View>;
 }
 const SR = [['9:16', 16 / 9], ['4:5', 1.25], ['1:1', 1]];
-function StoryEditor({ uri, onDone, onCancel }) {
+function StoryEditor({ uri, onDone, onCancel, busy: pb }) {
   const { width: SW, height: SH } = Dimensions.get('window');
   const [ri, setRi] = useState(0), [items, setItems] = useState([]), [txt, setTxt] = useState(null), [mus, setMus] = useState(false), [song, setSong] = useState(null), [busy, setBusy] = useState(false), [drag, setDrag] = useState({ on: false, over: false });
   const shot = useRef(null), wrap = useRef(null), org = useRef({ x: 0, y: 0 });
@@ -1576,7 +1587,7 @@ function StoryEditor({ uri, onDone, onCancel }) {
       <SafeAreaView style={s.root}>
         <View style={s.edTop}>
           <TouchableOpacity onPress={onCancel} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity>
-          <TouchableOpacity style={s.edOk} onPress={done} disabled={busy}><Ionicons name="checkmark" size={20} color="#06101F" /><Text style={s.btnText}>{busy ? '...' : 'Tamam'}</Text></TouchableOpacity>
+          <TouchableOpacity style={s.edOk} onPress={done} disabled={busy || pb}><Ionicons name="paper-plane" size={18} color="#06101F" /><Text style={s.btnText}>{busy || pb ? 'Paylaşılıyor...' : 'Paylaş'}</Text></TouchableOpacity>
         </View>
         <View style={{ alignItems: 'center' }}>
           <View ref={wrap} onLayout={() => wrap.current && wrap.current.measureInWindow((x, y) => { org.current = { x, y }; })} style={{ width: cw, height: ch }}>
@@ -1618,7 +1629,7 @@ function StoryEditor({ uri, onDone, onCancel }) {
   );
 }
 function StoryComposer({ me, pos, onClose }) {
-  const [uri, setUri] = useState(null), [img, setImg] = useState(null), [ratio, setRatio] = useState(1.25), [music, setMusic] = useState(null), [cap, setCap] = useState(''), [busy, setBusy] = useState(false);
+  const [uri, setUri] = useState(null), [busy, setBusy] = useState(false);
   useEffect(() => {
     (async () => {
       try {
@@ -1627,34 +1638,22 @@ function StoryComposer({ me, pos, onClose }) {
       } catch { onClose(); }
     })();
   }, []);
-  const post = async () => {
+  const post = async (b64, ratio, music) => {
     setBusy(true);
     try {
+      let p = pos;
+      try { p = (await Promise.race([Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }), new Promise((_, rj) => setTimeout(() => rj(0), 8000))])).coords; } catch {}
+      const loc = await placeOf(p.latitude, p.longitude);
       await api('stories?created_at=lt.' + new Date(Date.now() - 30 * 864e5).toISOString(), { method: 'DELETE' });
-      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +pos.latitude.toFixed(2), lon: +pos.longitude.toFixed(2), caption: packCap(cap.trim(), music), img };
+      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +p.latitude.toFixed(2), lon: +p.longitude.toFixed(2), caption: packCap('', music, loc), img: `data:image/jpeg;base64,${b64}` };
       const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(row) });
       if (!r.ok) throw 0;
+      AlertX.alert('Hikaye paylaşıldı', [loc.d, loc.c].filter(Boolean).length ? `${[loc.d, loc.c].filter(Boolean).join(', ')} konumunda 24 saat yayında.` : 'Hikayen 24 saat yayında.', [{ text: 'Tamam' }]);
       onClose();
-    } catch { AlertX.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
-    setBusy(false);
+    } catch { AlertX.alert('Paylaşılamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); setBusy(false); }
   };
   if (!uri) return null;
-  if (!img) return <StoryEditor uri={uri} onCancel={onClose} onDone={(b, r, m) => { setImg(`data:image/jpeg;base64,${b}`); setRatio(r); setMusic(m); }} />;
-  return (
-    <Modal visible animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={s.root}>
-        <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
-          <Text style={s.title}>Hikaye paylaş</Text>
-          <Image source={{ uri: img }} style={{ width: '100%', aspectRatio: 1 / ratio, borderRadius: 24 }} />
-          {music && <Text style={[s.itemSub, { marginTop: 10 }]}>♫ {music.title} — {music.artist}</Text>}
-          <TextInput style={s.input} value={cap} onChangeText={setCap} placeholder="Bir şey yaz (isteğe bağlı)" placeholderTextColor={C.dim} maxLength={120} />
-          <Text style={s.hint}>Hikaye 24 saat görünür ve yaklaşık konumunla (≈1 km) paylaşılır.</Text>
-          <TouchableOpacity style={s.btn} onPress={post} disabled={busy}><Text style={s.btnText}>{busy ? 'Paylaşılıyor...' : 'Paylaş'}</Text></TouchableOpacity>
-          <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, textAlign: 'center', padding: 14 }}>Vazgeç</Text></TouchableOpacity>
-        </ScrollView>
-      </SafeAreaView>
-    </Modal>
-  );
+  return <StoryEditor uri={uri} busy={busy} onCancel={onClose} onDone={post} />;
 }
 
 // ---- Kulüp yardımcıları ----
@@ -2359,6 +2358,46 @@ function Detail({ t, onBack, onDelete, onUpdate }) {
   );
 }
 
+const NEWS_VERSION = 15;
+const NEWS = [
+  { v: 15, kind: 'launch', title: 'Launch Control', text: 'Menüden aç, araç dururken Başlat\'a bas. 5\'ten geri sayar, gaza basınca 0–100, 100–200, 0–200 ve çeyrek mil sürelerini ölçer. Rekorların Profil\'de saklanır. Sadece kapalı pist ya da özel alanda dene.' },
+  { v: 15, kind: 'music', title: 'Hikayede müzik düzenleyici', text: 'Şarkıyı seç; albüm, plak ya da etiket stilini belirle ve dalga çubuğunu kaydırarak şarkının istediğin yerinden 5, 10 ya da 15 saniye seç. "Tam şarkı" kaynağında şarkının tamamından seçebilirsin.' },
+  { v: 15, kind: 'stories', title: 'Hikayelerim: Güncel ve Arşiv', text: 'Hikayeni tek ekrandan paylaş. 24 saati dolan hikayelerin Arşiv\'de 30 gün saklanır; kimlerin baktığını gör, indir ya da sil.' },
+  { v: 15, kind: 'nearby', title: 'Yakındaki sürücüler', text: 'Hikayeler sekmesinde aynı ilçe ya da ildeki sürücüleri ve hikayelerini gör. Hikayenin paylaşıldığı yer artık hikayenin üstünde yazar.' },
+  { v: 15, kind: 'map', title: 'Harita sadeleşti', text: 'Rota sekmesi kalktı. Sürüş sırasında rotan Bölgelerim haritasında canlı olarak görünür.' },
+  { v: 15, kind: 'back', title: 'Geri tuşu', text: 'Menülerden geri çıkar. Ana ekranda iki kez bas, uygulamadan çık.' },
+  { v: 15, kind: 'bell', title: 'Arka planda bildirim', text: 'Yeni sürüm bildirimi kapalıyken de gelsin diye Ayarlar\'daki pil ve otomatik başlatma izinlerini aç.' },
+];
+const hexPts = (cx, cy, r) => [0, 1, 2, 3, 4, 5].map((i) => { const a = ((60 * i - 30) * Math.PI) / 180; return `${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`; }).join(' ');
+function NewsArt({ kind }) {
+  const box = { height: 210, borderRadius: 28, backgroundColor: C.card, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginBottom: 22 };
+  if (kind === 'launch') return (<View style={box}><Ionicons name="flag" size={26} color={C.warn} /><Text style={{ color: C.accent, fontSize: 64, fontWeight: '800' }}>6.84</Text><Text style={s.itemSub}>0–100 km/s · saniye</Text><View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>{[5, 4, 3, 2, 1].map((n) => <View key={n} style={s.newsDot}><Text style={{ color: C.text, fontWeight: '800' }}>{n}</Text></View>)}</View></View>);
+  if (kind === 'music') { const bars = waveBars('news', 34); return (<View style={box}><Ionicons name="disc" size={56} color={C.accent} /><View style={{ flexDirection: 'row', alignItems: 'center', height: 54, gap: 3, marginTop: 12 }}>{bars.map((b, i) => <View key={i} style={{ width: 6, height: 8 + b * 34, borderRadius: 3, backgroundColor: i >= 10 && i < 24 ? C.text : C.dim }} />)}</View><View style={{ position: 'absolute', bottom: 38, width: 14 * 6 + 8, height: 62, borderRadius: 12, borderWidth: 3, borderColor: '#FFB02E' }} /><Text style={[s.itemSub, { marginTop: 10 }]}>Çalacak kısmı kaydırarak seç</Text></View>); }
+  if (kind === 'stories') return (<View style={box}><View style={{ flexDirection: 'row', gap: 14 }}>{['A', 'K', 'M'].map((l, i) => <View key={l} style={[s.nbAv, { width: 66, height: 66, borderRadius: 33, borderColor: i === 1 ? C.dim : '#FF2D55' }]}><Text style={s.pLetter}>{l}</Text></View>)}</View><View style={{ flexDirection: 'row', gap: 8, marginTop: 18 }}><View style={[s.fpill, { backgroundColor: C.sel }]}><Text style={s.navText}>Güncel</Text></View><View style={s.fpill}><Text style={s.navText}>Arşiv</Text></View></View></View>);
+  if (kind === 'nearby') return (<View style={box}><Ionicons name="location" size={46} color="#FF2D55" /><View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>{['E', 'S', 'B', 'D'].map((l, i) => <View key={l} style={[s.nbAv, { borderColor: i % 2 ? C.accent : '#FF2D55' }]}><Text style={s.pLetter}>{l}</Text></View>)}</View><View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}><View style={s.fpill}><Text style={s.navText}>İlçe</Text></View><View style={[s.fpill, { backgroundColor: C.sel }]}><Text style={s.navText}>İl</Text></View></View></View>);
+  if (kind === 'map') return (<View style={box}><Svg width={240} height={190}>{[[120, 95, 1], [120 + 58.9, 95, 1], [120 - 58.9, 95, 0], [150, 146, 1], [90, 146, 0], [150, 44, 0], [90, 44, 0]].map(([x, y, f], i) => <Polygon key={i} points={hexPts(x, y, 33)} fill={f ? '#2F8F9380' : 'none'} stroke="#7DD3D8" strokeWidth={1.5} />)}</Svg></View>);
+  if (kind === 'back') return (<View style={box}><View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><Ionicons name="chevron-back" size={70} color={C.accent} /><Text style={{ color: C.text, fontSize: 56, fontWeight: '800' }}>2×</Text></View><Text style={s.itemSub}>Ana ekranda çıkmak için</Text></View>);
+  return (<View style={box}><View style={{ width: 150, height: 150, borderRadius: 75, borderWidth: 2, borderColor: C.line, alignItems: 'center', justifyContent: 'center' }}><View style={{ width: 100, height: 100, borderRadius: 50, borderWidth: 2, borderColor: C.dim, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="notifications" size={44} color={C.accent} /></View></View></View>);
+}
+function NewsSheet({ items, onClose }) {
+  const W = Dimensions.get('window').width, [i, setI] = useState(0), ref = useRef(null);
+  const last = i === items.length - 1;
+  const go = (k) => { try { ref.current && ref.current.scrollToIndex({ index: k, animated: true }); } catch {} setI(k); };
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <SafeAreaView style={s.root}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 8 }}>
+          <Text style={s.name}>Yenilikler</Text>
+          <TouchableOpacity onPress={onClose}><Text style={{ color: C.dim, fontSize: 16 }}>Atla</Text></TouchableOpacity>
+        </View>
+        <FlatList ref={ref} data={items} horizontal pagingEnabled showsHorizontalScrollIndicator={false} keyExtractor={(x) => x.title} getItemLayout={(_, k) => ({ length: W, offset: W * k, index: k })} onMomentumScrollEnd={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / W))}
+          renderItem={({ item }) => (<View style={{ width: W, padding: 24 }}><NewsArt kind={item.kind} /><Text style={[s.name, { marginBottom: 10 }]}>{item.title}</Text><Text style={s.newsT}>{item.text}</Text></View>)} />
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 12 }}>{items.map((x, k) => <View key={x.title} style={{ width: k === i ? 22 : 8, height: 8, borderRadius: 4, backgroundColor: k === i ? C.accent : C.line }} />)}</View>
+        <TouchableOpacity style={[s.btn, { marginHorizontal: 24, marginTop: 0, marginBottom: 18 }]} onPress={() => (last ? onClose() : go(i + 1))}><Text style={s.btnText}>{last ? 'Başla' : 'İleri'}</Text></TouchableOpacity>
+      </SafeAreaView>
+    </Modal>
+  );
+}
 function AppInner() {
   const sysScheme = useColorScheme();
   const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1 });
@@ -2370,7 +2409,7 @@ function AppInner() {
   const [dlg, setDlg] = useState(null);
   Dlg.show = setDlg;
   const [settingsOpen, setSettingsOpen] = useState(false), [autoUpd, setAutoUpd] = useState(false);
-  const [launches, setLaunches] = useState([]), [toast, setToast] = useState(''), lastBack = useRef(0), tabRef = useRef('drive');
+  const [news, setNews] = useState(null), [launches, setLaunches] = useState([]), [toast, setToast] = useState(''), lastBack = useRef(0), tabRef = useRef('drive');
   const [tab, setTab] = useState('drive');
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
@@ -2482,7 +2521,7 @@ function AppInner() {
   };
 
   useEffect(() => { if (profile && trips.length) Promise.resolve(ensureProfile(profile)).then(() => syncProfile(profile, trips)); }, [profile, trips.length]);
-  const saveProfile = (p0) => { const p = initGarage(p0); setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
+  const saveProfile = (p0) => { if (profile === null) AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); const p = initGarage(p0); setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
   const pickAvatar = async () => {
     try {
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1] });
@@ -2519,7 +2558,8 @@ function AppInner() {
     const push = async () => {
       try {
         const p = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(2), lon: +p.coords.longitude.toFixed(2), car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', updated_at: new Date().toISOString() }) });
+        const pl = await placeOf(p.coords.latitude, p.coords.longitude);
+        await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(2), lon: +p.coords.longitude.toFixed(2), car: JSON.stringify({ car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', d: pl.d, c: pl.c }), updated_at: new Date().toISOString() }) });
       } catch {}
     };
     push(); const id = setInterval(push, 120000); return () => clearInterval(id);
@@ -2536,6 +2576,14 @@ function AppInner() {
     return () => clearTimeout(id);
   }, [docsBy, rem, vehicles.length]);
   tabRef.current = tab;
+  useEffect(() => {
+    if (!pReady || !profile) return;
+    AsyncStorage.getItem(NKEY).then((v) => {
+      const seen = v ? parseInt(v, 10) : null;
+      const items = NEWS.filter((n) => (seen == null ? n.v === NEWS_VERSION : n.v > seen));
+      if (items.length) setNews(items); else if (seen == null) AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {});
+    }).catch(() => {});
+  }, [pReady, !!profile]);
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (backStack.length) { backStack[backStack.length - 1](); return true; }
@@ -2601,7 +2649,7 @@ function AppInner() {
         </View>
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
-          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
+          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
           {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
@@ -2638,6 +2686,7 @@ function AppInner() {
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
         {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
+        {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
@@ -2813,5 +2862,11 @@ const mk = () => StyleSheet.create({
   toastW: { position: 'absolute', left: 0, right: 0, bottom: 110, alignItems: 'center' },
   toast: { backgroundColor: '#000D', borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10 },
   toastT: { color: '#fff', fontSize: 14 },
+  newsDot: { width: 34, height: 34, borderRadius: 17, backgroundColor: C.bg, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center' },
+  newsT: { color: C.dim, fontSize: 16, lineHeight: 24 },
+  nbBar: { position: 'absolute', top: 64, left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1C1C21EE', borderRadius: 26, paddingVertical: 8, paddingHorizontal: 10 },
+  nbPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14, backgroundColor: C.line, alignItems: 'center' },
+  nbAv: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
+  nbName: { color: '#fff', fontSize: 11, marginTop: 3, maxWidth: 62 },
 });
 s = mk();
