@@ -168,6 +168,7 @@ const carOf = (v) => ({ brand: v.brand, model: v.model, year: v.year, vtype: v.v
 const initGarage = (p) => (p && p.car && !p.vehicles ? { ...p, vehicles: [{ id: 'v0', ...carOf(p.car) }], vid: 'v0' } : p);
 const withVehicle = (p, v) => { const nv = { id: 'v' + Date.now(), ...v }; return { ...p, vehicles: [...(p.vehicles || []), nv], vid: nv.id, car: carOf(nv) }; };
 const pickVehicle = (p, id) => { const v = (p.vehicles || []).find((x) => x.id === id); return v ? { ...p, vid: id, car: carOf(v) } : p; };
+const updateVehicle = (p, id, v) => { const vs = (p.vehicles || []).map((x) => (x.id === id ? { ...x, ...v } : x)); const cur = vs.find((x) => x.id === p.vid); return { ...p, vehicles: vs, car: id === p.vid && cur ? carOf(cur) : p.car }; };
 const dropVehicle = (p, id) => { const rest = (p.vehicles || []).filter((x) => x.id !== id); if (!rest.length) return p; const nx = rest.find((x) => x.id === p.vid) || rest[0]; return { ...p, vehicles: rest, vid: nx.id, car: carOf(nx) }; };
 const fmtDur = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}sa ${m}dk` : `${m}dk`; };
 const online = !!(SUPA_URL && SUPA_KEY);
@@ -691,7 +692,7 @@ if(rI>=pts.length-1){rI=pts.length-1;window.rpPause();post({t:'end',i:rI,n:pts.l
 p=pts[Math.floor(rI)];rM.setLatLng([p[0],p[1]]);map.setView([p[0],p[1]],map.getZoom(),{animate:false});
 if(++n%4===0)post({t:'tick',i:Math.floor(rI),n:pts.length,v:p[2]});},60);};
 window.setPeople=function(a){pg.clearLayers();a.forEach(function(p){
-var ic=L.divIcon({className:'',html:'<div style="width:38px;height:38px;border-radius:19px;background:#1C1C21;border:3px solid '+(p.s?'#FF2D55':'#6EC7C7')+';color:#fff;font:700 15px sans-serif;display:flex;align-items:center;justify-content:center">'+p.u[0].toUpperCase()+'</div>',iconSize:[38,38]});
+var ic=L.divIcon({className:'',html:'<div style="width:42px;height:42px;border-radius:21px;overflow:hidden;background:#1C1C21;border:3px solid '+(p.s?'#FF2D55':'#6EC7C7')+';color:#fff;font:700 15px sans-serif;display:flex;align-items:center;justify-content:center">'+(p.img?'<img src="'+p.img+'" style="width:100%;height:100%;object-fit:cover">':p.u[0].toUpperCase())+'</div>',iconSize:[42,42]});
 L.marker([p.lat,p.lon],{icon:ic}).on('click',function(){post({t:'person',u:p.u});}).addTo(pg);});};
 window.fit=function(){if(pts.length>1)map.fitBounds(L.latLngBounds(pts.map(function(q){return [q[0],q[1]];})),{padding:[30,30],animate:false});};
 window.setMe=function(la,lo,go){var ll=[la,lo];if(!me)me=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#6EC7C7',fillOpacity:1}).addTo(map);else me.setLatLng(ll);if(go)map.setView(ll,Math.max(map.getZoom(),15),{animate:true});};
@@ -776,15 +777,31 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
   const [mode, setMode] = useState('cells');
   useBack(mode !== 'cells', () => setMode('cells'));
   const [sat, setSat] = useState(false);
-  const [all, setAll] = useState([]), [person, setPerson] = useState(null), [composer, setComposer] = useState(false), [myst, setMyst] = useState(false), [scope, setScope] = useState('il'), [myPlace, setMyPlace] = useState(null);
-  const people = me ? all.filter((p) => inScope(p, myPlace, scope, me)) : [];
+  const [all, setAll] = useState([]), [avs, setAvs] = useState({}), [person, setPerson] = useState(null), [composer, setComposer] = useState(false), [myst, setMyst] = useState(false), [myPlace, setMyPlace] = useState(null);
+  const scope = prefs.scope || 'il', self = profile && profile.username;
+  const people = useMemo(() => (me ? all.filter((p) => inScope(p, myPlace, scope, me)) : []).map((p) => ({ ...p, ...(p.u === self ? { lat: me.latitude, lon: me.longitude } : {}), img: p.u === self ? (profile.thumb || profile.avatar || '') : avs[p.u] || '' })),
+    [all, avs, myPlace, scope, me && Math.round(me.latitude * 1e4), me && Math.round(me.longitude * 1e4), profile && profile.thumb, profile && profile.avatar]);
+  useEffect(() => {
+    const need = all.map((p) => p.u).filter((u) => u !== self && avs[u] === undefined).slice(0, 40);
+    if (!need.length || !online) return;
+    (async () => {
+      try {
+        const r = await api(`profiles?username=in.(${need.map(encodeURIComponent).join(',')})&select=username,avatar`);
+        const j = r.ok ? await r.json() : [];
+        const n = {};
+        need.forEach((u) => { n[u] = ''; });
+        (Array.isArray(j) ? j : []).forEach((x) => { if (x.avatar) n[x.username] = x.avatar; });
+        setAvs((p) => ({ ...p, ...n }));
+      } catch {}
+    })();
+  }, [all]);
   useEffect(() => { if (me && !myPlace) placeOf(me.latitude, me.longitude).then(setMyPlace); }, [!!me]);
   useEffect(() => {
     if (mode !== 'stories' || prefs.visible) return;
     AsyncStorage.getItem('@apexdrive_visasked').then((v) => {
       if (v) return;
       AsyncStorage.setItem('@apexdrive_visasked', '1').catch(() => {});
-      AlertX.alert('Yakındakiler seni görsün mü?', 'Açarsan aynı ilçe/ildeki sürücüler seni Hikayeler çubuğunda ve haritada görür. Konumun yaklaşık (≈1 km) paylaşılır. Ayarlar\'dan istediğin zaman kapatabilirsin.', [{ text: 'Hayır', style: 'cancel' }, { text: 'Görünür ol', onPress: () => setPrefs({ ...prefs, visible: true }) }]);
+      AlertX.alert('Yakındakiler seni görsün mü?', 'Açarsan aynı ilçe/ildeki sürücüler seni Hikayeler çubuğunda ve haritada görür. Konumun yaklaşık (≈100 m) paylaşılır. Ayarlar\'dan istediğin zaman kapatabilirsin.', [{ text: 'Hayır', style: 'cancel' }, { text: 'Görünür ol', onPress: () => setPrefs({ ...prefs, visible: true }) }]);
     }).catch(() => {});
   }, [mode]);
   useEffect(() => {
@@ -823,14 +840,11 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
       </View>
       {mode === 'stories' && online && (
         <View style={s.nbBar}>
-          <View style={{ gap: 6 }}>
-            {[['ilce', 'İlçe'], ['il', 'İl']].map(([k, l]) => <TouchableOpacity key={k} style={[s.nbPill, scope === k && { backgroundColor: C.accent }]} onPress={() => setScope(k)}><Text style={{ color: scope === k ? '#06101F' : C.text, fontWeight: '700', fontSize: 12 }}>{l}</Text></TouchableOpacity>)}
-          </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, alignItems: 'center', paddingRight: 8 }}>
             {people.length === 0 && <Text style={[s.itemSub, { maxWidth: 230 }]}>Yakında kimse görünmüyor. Arkadaşların Ayarlar'dan "Yakındakilere görün"ü açmalı.</Text>}
             {people.map((p) => (
               <TouchableOpacity key={p.u} style={{ alignItems: 'center', width: 62 }} onPress={() => setPerson(p.u)}>
-                <View style={[s.nbAv, { borderColor: p.s ? '#FF2D55' : C.accent }]}><Text style={s.pLetter}>{p.u[0].toUpperCase()}</Text></View>
+                <View style={[s.nbAv, { borderColor: p.s ? '#FF2D55' : C.accent }]}>{p.img ? <Image source={{ uri: p.img }} style={{ width: '100%', height: '100%' }} /> : <Text style={s.pLetter}>{p.u[0].toUpperCase()}</Text>}</View>
                 <Text style={s.nbName} numberOfLines={1}>{p.u}</Text>
               </TouchableOpacity>
             ))}
@@ -1058,8 +1072,8 @@ async function scheduleReminders(by, rem, vehicles) {
 }
 const fmtD = (v) => { const x = v.replace(/\D/g, '').slice(0, 8); return x.length > 4 ? `${x.slice(0, 2)}.${x.slice(2, 4)}.${x.slice(4)}` : x.length > 2 ? `${x.slice(0, 2)}.${x.slice(2)}` : x; };
 
-function AddVehicle({ onAdd, onClose }) {
-  const [vt, setVt] = useState('car'), [car, setCar] = useState({ brand: '', model: '', year: '' }), [pick, setPick] = useState(null);
+function AddVehicle({ onAdd, onClose, init }) {
+  const [vt, setVt] = useState(init ? init.vtype || 'car' : 'car'), [car, setCar] = useState(init ? { brand: init.brand, model: init.model, year: String(init.year) } : { brand: '', model: '', year: '' }), [pick, setPick] = useState(null);
   const map = vt === 'moto' ? MOTO_MAP : CAR_MAP;
   const Field = ({ label, value, onPress, off }) => (
     <TouchableOpacity style={[s.input, off && { opacity: 0.4 }]} onPress={off ? undefined : onPress}><Text style={{ color: value ? C.text : C.dim, fontSize: 17 }}>{value || label}</Text></TouchableOpacity>
@@ -1072,12 +1086,12 @@ function AddVehicle({ onAdd, onClose }) {
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end' }}>
         <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Araç ekle</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>{init ? 'Aracı düzenle' : 'Araç ekle'}</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
           <Chips opts={[['Araba', 'car'], ['Motor', 'moto']]} val={vt} onPick={(v) => { setVt(v); setCar({ brand: '', model: '', year: car.year }); }} />
           <Field label="Marka" value={car.brand} onPress={() => setPick('brand')} />
           <Field label="Model" value={car.model} off={!car.brand} onPress={() => setPick('model')} />
           <Field label="Yıl" value={car.year} onPress={() => setPick('year')} />
-          <TouchableOpacity style={s.btn} onPress={ok}><Text style={s.btnText}>Ekle</Text></TouchableOpacity>
+          <TouchableOpacity style={s.btn} onPress={ok}><Text style={s.btnText}>{init ? 'Kaydet' : 'Ekle'}</Text></TouchableOpacity>
         </View>
       </View>
       {pick && (
@@ -1091,8 +1105,8 @@ function AddVehicle({ onAdd, onClose }) {
     </Modal>
   );
 }
-function VehicleTab({ me, docs, setDocs, rem, setRem, garage = { vehicles: [], vid: 'v0' }, onSelect, onAdd, onRemove, stats = { km: 0, n: 0 } }) {
-  const [addOpen, setAddOpen] = useState(false);
+function VehicleTab({ me, docs, setDocs, rem, setRem, garage = { vehicles: [], vid: 'v0' }, onSelect, onAdd, onRemove, onEdit, stats = { km: 0, n: 0 } }) {
+  const [addOpen, setAddOpen] = useState(false), [editOpen, setEditOpen] = useState(false);
   const setStart = (k, v) => { const d = parseDate(v), y = docs['yr_' + k] || DEFY[k]; setDocs({ ...docs, ['st_' + k]: v, [k]: d ? fmtOut(addYears(d, y)) : '' }); };
   const setYears = (k, y) => { const d = parseDate(docs['st_' + k]); setDocs({ ...docs, ['yr_' + k]: y, ...(d ? { [k]: fmtOut(addYears(d, y)) } : {}) }); };
   const test = async () => {
@@ -1116,7 +1130,12 @@ function VehicleTab({ me, docs, setDocs, rem, setRem, garage = { vehicles: [], v
           <Ionicons name="add" size={28} color={C.accent} /><Text style={s.itemTitle}>Araç ekle</Text><Text style={s.itemSub}>Araba veya motor</Text>
         </TouchableOpacity>
       </ScrollView>
-      {me.car && <Text style={[s.itemSub, { marginBottom: 4 }]}>{me.car.brand} {me.car.model} · {me.car.year}</Text>}
+      {me.car && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <Text style={[s.itemSub, { flex: 1 }]}>{me.car.brand} {me.car.model} · {me.car.year}</Text>
+          <TouchableOpacity style={s.fpill} onPress={() => setEditOpen(true)}><Ionicons name="create-outline" size={16} color={C.text} /><Text style={s.navText}>Düzenle</Text></TouchableOpacity>
+        </View>
+      )}
       <Text style={[s.itemSub, { marginBottom: 14, color: C.text }]}>Bu araçla: {stats.km.toFixed(1)} km · {stats.n} sürüş</Text>
       {garage.vehicles.length > 1 && <Text style={[s.hint, { textAlign: 'left', marginTop: 0, marginBottom: 12 }]}>Silmek için araca uzun bas. Km, dönüşler ve belgeler seçili araca göre gösterilir.</Text>}
       <Text style={[s.itemSub, { marginBottom: 12 }]}>Başlangıç tarihini ve süreyi gir, bitiş tarihi kendiliğinden hesaplanır.</Text>
@@ -1149,6 +1168,7 @@ function VehicleTab({ me, docs, setDocs, rem, setRem, garage = { vehicles: [], v
       </View>
       <TouchableOpacity style={[s.btn, { backgroundColor: C.card }]} onPress={test}><Text style={[s.btnText, { color: C.accent }]}>Test bildirimi gönder</Text></TouchableOpacity>
       {addOpen && <AddVehicle onAdd={(v) => { setAddOpen(false); onAdd && onAdd(v); }} onClose={() => setAddOpen(false)} />}
+      {editOpen && <AddVehicle init={garage.vehicles.find((v) => v.id === garage.vid) || me.car} onAdd={(v) => { setEditOpen(false); onEdit && onEdit(v); }} onClose={() => setEditOpen(false)} />}
     </ScrollView>
   );
 }
@@ -1308,7 +1328,9 @@ function PersonSheet({ u, me, onClose }) {
   useEffect(() => {
     (async () => {
       try {
-        setPr((await (await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year`)).json())[0] || { username: u });
+        let pq = await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year,avatar`);
+        if (!pq.ok) pq = await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username,total_km,top_speed,trips,car_brand,car_model,car_year`);
+        setPr((await pq.json())[0] || { username: u });
         setSt(await (await api(`stories?username=eq.${encodeURIComponent(u)}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&order=created_at.desc&select=id,caption,img,created_at`)).json());
       } catch {}
     })();
@@ -1319,7 +1341,7 @@ function PersonSheet({ u, me, onClose }) {
         <View style={s.modalBg}>
           <View style={s.modal}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-              <View style={[s.pAv, { width: 56, height: 56, borderRadius: 28 }]}><Text style={s.pLetter}>{u[0].toUpperCase()}</Text></View>
+              {pr && pr.avatar ? <Image source={{ uri: pr.avatar }} style={{ width: 56, height: 56, borderRadius: 28 }} /> : <View style={[s.pAv, { width: 56, height: 56, borderRadius: 28 }]}><Text style={s.pLetter}>{u[0].toUpperCase()}</Text></View>}
               <View style={{ flex: 1 }}><Text style={s.name}>{u}</Text><Text style={s.itemSub}>{pr?.car_brand ? `${pr.car_brand} ${pr.car_model} · ${pr.car_year || ''}` : ''}</Text></View>
             </View>
             {pr?.total_km != null && <Text style={[s.itemSub, { marginTop: 10 }]}>{pr.total_km.toFixed(0)} km · {pr.trips} sürüş · maks. {Math.round(pr.top_speed)} km/s</Text>}
@@ -1342,21 +1364,25 @@ function Intro({ onDone }) {
   const t = useRef(new Animated.Value(0)).current, fade = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});
-    Animated.sequence([
-      Animated.timing(t, { toValue: 1, duration: 1700, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(fade, { toValue: 0, duration: 350, useNativeDriver: true }),
-    ]).start(() => onDone());
+    // ilk 450 ms logo sabit kalır: uygulamanın ağır ilk çizimi animasyonla çakışmasın
+    const id = setTimeout(() => {
+      Animated.sequence([
+        Animated.timing(t, { toValue: 1, duration: 950, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(fade, { toValue: 0, duration: 260, useNativeDriver: true }),
+      ]).start(() => onDone());
+    }, 450);
+    return () => clearTimeout(id);
   }, []);
   const I = (r, o, x) => t.interpolate({ inputRange: r, outputRange: o, ...(x || {}) });
   return (
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#0B2B4A', alignItems: 'center', justifyContent: 'center', opacity: fade }]}>
       <StatusBar style="light" />
-      {[0.34, 0.5, 0.66].map((y, i) => (
-        <Animated.View key={i} style={{ position: 'absolute', top: `${y * 100}%`, left: 0, width: 180, height: 3, borderRadius: 2, backgroundColor: i === 1 ? '#FF9A3C' : '#6EC7C7', opacity: I([0, 0.3, 0.8, 1], [0, 0.9, 0.5, 0]), transform: [{ translateX: I([0, 1], [-200, 620 + i * 40]) }] }} />
+      {[0.4, 0.6].map((y, i) => (
+        <Animated.View key={i} renderToHardwareTextureAndroid style={{ position: 'absolute', top: `${y * 100}%`, left: 0, width: 160, height: 3, borderRadius: 2, backgroundColor: i === 1 ? '#FF9A3C' : '#6EC7C7', opacity: I([0, 0.3, 0.8, 1], [0, 0.9, 0.5, 0]), transform: [{ translateX: I([0, 1], [-180, 560 + i * 40]) }] }} />
       ))}
-      <Animated.View style={{ position: 'absolute', width: 220, height: 220, borderRadius: 110, borderWidth: 2, borderColor: '#6EC7C7', opacity: I([0, 0.25, 1], [0, 0.6, 0]), transform: [{ scale: I([0, 1], [0.7, 2.4]) }] }} />
-      <Animated.Image source={require('./splash-icon.png')} style={{ width: 220, height: 220, transform: [{ scale: I([0, 0.45, 1], [1, 1.1, 1]) }] }} resizeMode="contain" />
-      <Animated.Text style={{ color: '#fff', fontSize: 30, fontWeight: '800', fontStyle: 'italic', marginTop: 6, opacity: I([0.3, 0.7], [0, 1], { extrapolate: 'clamp' }), transform: [{ translateY: I([0.3, 0.7], [16, 0], { extrapolate: 'clamp' }) }] }}>ApexDrive</Animated.Text>
+      <Animated.View renderToHardwareTextureAndroid style={{ position: 'absolute', width: 160, height: 160, borderRadius: 80, borderWidth: 2, borderColor: '#6EC7C7', opacity: I([0, 0.25, 1], [0, 0.55, 0]), transform: [{ scale: I([0, 1], [0.8, 2.2]) }] }} />
+      <Animated.Image renderToHardwareTextureAndroid source={require('./splash-icon.png')} style={{ width: 220, height: 220, transform: [{ scale: I([0, 0.5, 1], [1, 1.06, 1]) }] }} resizeMode="contain" />
+      <Animated.Text renderToHardwareTextureAndroid style={{ color: '#fff', fontSize: 30, fontWeight: '800', fontStyle: 'italic', marginTop: 6, opacity: I([0.25, 0.65], [0, 1], { extrapolate: 'clamp' }), transform: [{ translateY: I([0.25, 0.65], [14, 0], { extrapolate: 'clamp' }) }] }}>ApexDrive</Animated.Text>
     </Animated.View>
   );
 }
@@ -1645,7 +1671,7 @@ function StoryComposer({ me, pos, onClose }) {
       try { p = (await Promise.race([Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }), new Promise((_, rj) => setTimeout(() => rj(0), 8000))])).coords; } catch {}
       const loc = await placeOf(p.latitude, p.longitude);
       await api('stories?created_at=lt.' + new Date(Date.now() - 30 * 864e5).toISOString(), { method: 'DELETE' });
-      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +p.latitude.toFixed(2), lon: +p.longitude.toFixed(2), caption: packCap('', music, loc), img: `data:image/jpeg;base64,${b64}` };
+      const row = { username: me.username, car: me.car ? `${me.car.brand} ${me.car.model}` : '', lat: +p.latitude.toFixed(3), lon: +p.longitude.toFixed(3), caption: packCap('', music, loc), img: `data:image/jpeg;base64,${b64}` };
       const r = await api('stories', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(row) });
       if (!r.ok) throw 0;
       AlertX.alert('Hikaye paylaşıldı', [loc.d, loc.c].filter(Boolean).length ? `${[loc.d, loc.c].filter(Boolean).join(', ')} konumunda 24 saat yayında.` : 'Hikayen 24 saat yayında.', [{ text: 'Tamam' }]);
@@ -2145,7 +2171,8 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Ayarlar</Text><TouchableOpacity onPress={onClose} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
           <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
           <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
-          <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈1 km) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+          <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈100 m) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+          <Box title="Hikaye kapsamı" sub="Hikayeler sekmesinde hangi sürücüleri göreceğini seçer."><Chips opts={[['İlçe', 'ilce'], ['İl', 'il']]} val={prefs.scope || 'il'} onPick={(v) => setPrefs({ ...prefs, scope: v })} /></Box>
           <Box title="Gazlama bildirimleri" sub="Günde 3 kez, rastgele saatlerde (10:00–21:30 arası) sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlanır."><Chips opts={[['Kapalı', 0], ['Açık', 1]]} val={prefs.daily ? 1 : 0} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
           {Platform.OS === 'android' && (
             <Box title="Arka planda bildirim" sub="Uygulama kapalıyken yeni sürüm bildiriminin gelmesi için telefonun uygulamayı arka planda çalıştırmasına izin vermesi gerekir. Xiaomi/POCO'da iki ayarı da aç.">
@@ -2358,8 +2385,10 @@ function Detail({ t, onBack, onDelete, onUpdate }) {
   );
 }
 
-const NEWS_VERSION = 15;
+const NEWS_VERSION = 16;
 const NEWS = [
+  { v: 16, kind: 'nearby', title: 'Profil fotoğrafın haritada', text: 'Hikayeler sekmesinde artık harf yerine sürücülerin profil fotoğrafları görünür. Konum yaklaşık 100 m hassasiyetle ve GPS ile alınır. İlçe / İl seçimi Ayarlar\'a taşındı (Hikaye kapsamı).' },
+  { v: 16, kind: 'garage', title: 'Aracını düzenle', text: 'Araç sekmesinde seçili aracın yanındaki Düzenle düğmesiyle marka, model, yıl ve araç türünü düzeltebilirsin. Km ve dönüş verilerin yerinde kalır.' },
   { v: 15, kind: 'launch', title: 'Launch Control', text: 'Menüden aç, araç dururken Başlat\'a bas. 5\'ten geri sayar, gaza basınca 0–100, 100–200, 0–200 ve çeyrek mil sürelerini ölçer. Rekorların Profil\'de saklanır. Sadece kapalı pist ya da özel alanda dene.' },
   { v: 15, kind: 'music', title: 'Hikayede müzik düzenleyici', text: 'Şarkıyı seç; albüm, plak ya da etiket stilini belirle ve dalga çubuğunu kaydırarak şarkının istediğin yerinden 5, 10 ya da 15 saniye seç. "Tam şarkı" kaynağında şarkının tamamından seçebilirsin.' },
   { v: 15, kind: 'stories', title: 'Hikayelerim: Güncel ve Arşiv', text: 'Hikayeni tek ekrandan paylaş. 24 saati dolan hikayelerin Arşiv\'de 30 gün saklanır; kimlerin baktığını gör, indir ya da sil.' },
@@ -2375,6 +2404,7 @@ function NewsArt({ kind }) {
   if (kind === 'music') { const bars = waveBars('news', 34); return (<View style={box}><Ionicons name="disc" size={56} color={C.accent} /><View style={{ flexDirection: 'row', alignItems: 'center', height: 54, gap: 3, marginTop: 12 }}>{bars.map((b, i) => <View key={i} style={{ width: 6, height: 8 + b * 34, borderRadius: 3, backgroundColor: i >= 10 && i < 24 ? C.text : C.dim }} />)}</View><View style={{ position: 'absolute', bottom: 38, width: 14 * 6 + 8, height: 62, borderRadius: 12, borderWidth: 3, borderColor: '#FFB02E' }} /><Text style={[s.itemSub, { marginTop: 10 }]}>Çalacak kısmı kaydırarak seç</Text></View>); }
   if (kind === 'stories') return (<View style={box}><View style={{ flexDirection: 'row', gap: 14 }}>{['A', 'K', 'M'].map((l, i) => <View key={l} style={[s.nbAv, { width: 66, height: 66, borderRadius: 33, borderColor: i === 1 ? C.dim : '#FF2D55' }]}><Text style={s.pLetter}>{l}</Text></View>)}</View><View style={{ flexDirection: 'row', gap: 8, marginTop: 18 }}><View style={[s.fpill, { backgroundColor: C.sel }]}><Text style={s.navText}>Güncel</Text></View><View style={s.fpill}><Text style={s.navText}>Arşiv</Text></View></View></View>);
   if (kind === 'nearby') return (<View style={box}><Ionicons name="location" size={46} color="#FF2D55" /><View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>{['E', 'S', 'B', 'D'].map((l, i) => <View key={l} style={[s.nbAv, { borderColor: i % 2 ? C.accent : '#FF2D55' }]}><Text style={s.pLetter}>{l}</Text></View>)}</View><View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}><View style={s.fpill}><Text style={s.navText}>İlçe</Text></View><View style={[s.fpill, { backgroundColor: C.sel }]}><Text style={s.navText}>İl</Text></View></View></View>);
+  if (kind === 'garage') return (<View style={box}><View style={[s.gCard, { borderColor: C.accent, width: 190 }]}><Ionicons name="car-sport" size={30} color={C.accent} /><Text style={s.itemTitle}>Renault Megane</Text><Text style={s.itemSub}>2007 · seçili</Text></View><View style={[s.fpill, { marginTop: 16 }]}><Ionicons name="create-outline" size={16} color={C.text} /><Text style={s.navText}>Düzenle</Text></View></View>);
   if (kind === 'map') return (<View style={box}><Svg width={240} height={190}>{[[120, 95, 1], [120 + 58.9, 95, 1], [120 - 58.9, 95, 0], [150, 146, 1], [90, 146, 0], [150, 44, 0], [90, 44, 0]].map(([x, y, f], i) => <Polygon key={i} points={hexPts(x, y, 33)} fill={f ? '#2F8F9380' : 'none'} stroke="#7DD3D8" strokeWidth={1.5} />)}</Svg></View>);
   if (kind === 'back') return (<View style={box}><View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><Ionicons name="chevron-back" size={70} color={C.accent} /><Text style={{ color: C.text, fontSize: 56, fontWeight: '800' }}>2×</Text></View><Text style={s.itemSub}>Ana ekranda çıkmak için</Text></View>);
   return (<View style={box}><View style={{ width: 150, height: 150, borderRadius: 75, borderWidth: 2, borderColor: C.line, alignItems: 'center', justifyContent: 'center' }}><View style={{ width: 100, height: 100, borderRadius: 50, borderWidth: 2, borderColor: C.dim, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="notifications" size={44} color={C.accent} /></View></View></View>);
@@ -2398,9 +2428,9 @@ function NewsSheet({ items, onClose }) {
     </Modal>
   );
 }
-function AppInner() {
+function AppInner({ ready }) {
   const sysScheme = useColorScheme();
-  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1 });
+  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1, scope: 'il' });
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
@@ -2525,17 +2555,20 @@ function AppInner() {
   const pickAvatar = async () => {
     try {
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1] });
-      if (!res.canceled) saveProfile({ ...profile, avatar: `data:image/jpeg;base64,${res.assets[0].base64}` });
+      if (res.canceled) return;
+      const th = await shrink(res.assets[0].uri, 128);
+      saveProfile({ ...profile, avatar: `data:image/jpeg;base64,${res.assets[0].base64}`, thumb: th || undefined });
     } catch {}
   };
   useEffect(() => { AsyncStorage.getItem(CKEY).then((v) => v && setCellStore((p) => [...new Set([...JSON.parse(v), ...p])])).catch(() => {}); }, []);
   useEffect(() => {
+    if (!ready) return;
     const add = cellsOf(trips.map((t) => t.route || []));
     if (!add.length) return;
     setCellStore((p) => { const n = [...new Set([...p, ...add])]; if (n.length === p.length) return p; AsyncStorage.setItem(CKEY, JSON.stringify(n)).catch(() => {}); return n; });
-  }, [trips]);
+  }, [trips, ready]);
   useEffect(() => {
-    if (!pReady) return;
+    if (!pReady || !ready) return;
     const lim = Date.now() - prefs.keepDays * 864e5;
     const need = trips.some((t) => (t.route && t.route.length && t.start < lim) || (t.route && t.route.length > 8 && t.turnsV !== 2) || t.still == null);
     if (need) {
@@ -2547,23 +2580,40 @@ function AppInner() {
       });
       setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     }
-  }, [trips, prefs.keepDays, pReady]);
+  }, [trips, prefs.keepDays, pReady, ready]);
   useEffect(() => {
     AsyncStorage.getItem(SKEY).then((v) => { pLoaded.current = true; if (v) setPrefs((p) => ({ ...p, ...JSON.parse(v) })); setPReady(true); }).catch(() => { pLoaded.current = true; setPReady(true); });
   }, []);
   useEffect(() => { if (pLoaded.current) AsyncStorage.setItem(SKEY, JSON.stringify(prefs)).catch(() => {}); }, [prefs]);
   useEffect(() => {
-    if (!online || !profile) return;
+    if (!online || !profile || !ready) return;
     if (!prefs.visible) { api(`presence?username=eq.${profile.username}`, { method: 'DELETE' }).catch(() => {}); return; }
     const push = async () => {
       try {
-        const p = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        let p;
+        try { p = await Promise.race([Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }), new Promise((_, rj) => setTimeout(() => rj(0), 9000))]); } catch { p = await Location.getLastKnownPositionAsync(); }
+        if (!p) return;
         const pl = await placeOf(p.coords.latitude, p.coords.longitude);
-        await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(2), lon: +p.coords.longitude.toFixed(2), car: JSON.stringify({ car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', d: pl.d, c: pl.c }), updated_at: new Date().toISOString() }) });
+        await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(3), lon: +p.coords.longitude.toFixed(3), car: JSON.stringify({ car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', d: pl.d, c: pl.c }), updated_at: new Date().toISOString() }) });
       } catch {}
     };
     push(); const id = setInterval(push, 120000); return () => clearInterval(id);
-  }, [prefs.visible, profile?.username]);
+  }, [prefs.visible, profile?.username, ready]);
+  useEffect(() => {
+    if (!ready || !profile || !online) return;
+    (async () => {
+      let th = profile.thumb;
+      if (!th && profile.avatar) {
+        try {
+          const f = FileSystem.cacheDirectory + 'av.jpg';
+          await FileSystem.writeAsStringAsync(f, profile.avatar.split(',')[1], { encoding: FileSystem.EncodingType.Base64 });
+          th = await shrink(f, 128);
+          if (th) saveProfile({ ...profile, thumb: th });
+        } catch {}
+      }
+      if (th) api(`profiles?username=eq.${profile.username}&device_id=eq.${profile.deviceId}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ avatar: th }) }).catch(() => {});
+    })();
+  }, [ready, profile && profile.thumb, profile && profile.avatar]);
   const cells = useMemo(() => [...new Set([...cellStore, ...cellsOf([route])])], [cellStore, route]);
   const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
   useEffect(() => {
@@ -2572,18 +2622,18 @@ function AppInner() {
   useEffect(() => {
     if (!vLoaded.current) return;
     AsyncStorage.setItem(VKEY, JSON.stringify({ by: docsBy, rem })).catch(() => {});
-    const id = setTimeout(() => scheduleReminders(docsBy, rem, vehicles), 800);
+    const id = setTimeout(() => { if (ready) scheduleReminders(docsBy, rem, vehicles); }, 800);
     return () => clearTimeout(id);
-  }, [docsBy, rem, vehicles.length]);
+  }, [docsBy, rem, vehicles.length, ready]);
   tabRef.current = tab;
   useEffect(() => {
-    if (!pReady || !profile) return;
+    if (!pReady || !profile || !ready) return;
     AsyncStorage.getItem(NKEY).then((v) => {
       const seen = v ? parseInt(v, 10) : null;
       const items = NEWS.filter((n) => (seen == null ? n.v === NEWS_VERSION : n.v > seen));
       if (items.length) setNews(items); else if (seen == null) AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {});
     }).catch(() => {});
-  }, [pReady, !!profile]);
+  }, [pReady, !!profile, ready]);
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (backStack.length) { backStack[backStack.length - 1](); return true; }
@@ -2598,12 +2648,12 @@ function AppInner() {
   useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') notifyUpdate(); }); return () => sub.remove(); }, []);
   useEffect(() => { AsyncStorage.getItem(LKEY).then((v) => v && setLaunches(JSON.parse(v))).catch(() => {}); }, []);
   const saveLaunch = (r) => setLaunches((p) => { const n = [r, ...p].slice(0, 200); AsyncStorage.setItem(LKEY, JSON.stringify(n)).catch(() => {}); return n; });
-  useEffect(() => { if (pReady) scheduleDaily(prefs, trips); }, [pReady, prefs.daily, trips.length]);
+  useEffect(() => { if (pReady && ready) scheduleDaily(prefs, trips); }, [pReady, ready, prefs.daily, trips.length]);
   useEffect(() => {
-    if (!pReady) return;
+    if (!pReady || !ready) return;
     notifyUpdate();
     BackgroundTask.registerTaskAsync(UPD_TASK, { minimumInterval: 15 }).catch(() => {});
-  }, [pReady]);
+  }, [pReady, ready]);
   useEffect(() => {
     const go = async (r) => {
       if (!r) return;
@@ -2627,6 +2677,7 @@ function AppInner() {
   const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
   const selectVehicle = (id) => saveProfile(pickVehicle(profile, id));
   const addVehicle = (v) => saveProfile(withVehicle(profile, v));
+  const editVehicle = (v) => saveProfile(updateVehicle(profile, activeV, v));
   const removeVehicle = (id) => {
     if (vehicles.length < 2) return AlertX.alert('Silinemez', 'En az bir aracın olmalı.');
     const v = vehicles.find((x) => x.id === id);
@@ -2651,7 +2702,7 @@ function AppInner() {
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
           {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
-          {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
+          {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onEdit={editVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
           {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
         <View style={s.navWrap} pointerEvents="box-none">
@@ -2704,11 +2755,12 @@ function AppInner() {
 }
 
 export default function App() {
-  const [intro, setIntro] = useState(true);
+  const [intro, setIntro] = useState(true), [ready, setReady] = useState(false);
+  useEffect(() => { const id = setTimeout(() => setReady(true), 3500); return () => clearTimeout(id); }, []);
   return (
     <View style={{ flex: 1, backgroundColor: '#0B2B4A' }}>
-      <AppInner />
-      {intro && <Intro onDone={() => setIntro(false)} />}
+      <AppInner ready={ready} />
+      {intro && <Intro onDone={() => { setIntro(false); setReady(true); }} />}
     </View>
   );
 }
@@ -2866,7 +2918,7 @@ const mk = () => StyleSheet.create({
   newsT: { color: C.dim, fontSize: 16, lineHeight: 24 },
   nbBar: { position: 'absolute', top: 64, left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1C1C21EE', borderRadius: 26, paddingVertical: 8, paddingHorizontal: 10 },
   nbPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14, backgroundColor: C.line, alignItems: 'center' },
-  nbAv: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
+  nbAv: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   nbName: { color: '#fff', fontSize: 11, marginTop: 3, maxWidth: 62 },
 });
 s = mk();
