@@ -4,8 +4,6 @@
 ​Sürüşlerinizi Analiz Edin, Bölgeleri Ele Geçirin, Tutkunuza Liderlik Edin!
 
 ​ApexDrive; sürüş telemetrisi, harita üzerinde bölge hakimiyeti (gamification), araç bakım ve belge takibi ile sosyal sürücü kulüplerini tek bir platformda buluşturan yeni nesil akıllı sürüş ve telemetri uygulamasıdır.
-
-​Özellikler • Ekran Görüntüleri • Kurulum • Teknolojiler • Katkıda Bulunma
 ​
 
 ​📌 Öne Çıkan Özellikler
