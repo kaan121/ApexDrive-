@@ -30,6 +30,7 @@
     "expo-background-task": "*",
     "expo-document-picker": "*",
     "expo-image-manipulator": "*",
-    "expo-media-library": "*"
+    "expo-media-library": "*",
+    "expo-secure-store": "*"
   }
 }

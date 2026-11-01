@@ -24,6 +24,7 @@ import * as Sharing from 'expo-sharing';
 import { captureRef } from 'react-native-view-shot';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { restore, sendCode, verifyCode, getToken, signOut, sess } from './auth';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: '#2E4545' };
@@ -172,21 +173,24 @@ const updateVehicle = (p, id, v) => { const vs = (p.vehicles || []).map((x) => (
 const dropVehicle = (p, id) => { const rest = (p.vehicles || []).filter((x) => x.id !== id); if (!rest.length) return p; const nx = rest.find((x) => x.id === p.vid) || rest[0]; return { ...p, vehicles: rest, vid: nx.id, car: carOf(nx) }; };
 const fmtDur = (s) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}sa ${m}dk` : `${m}dk`; };
 const online = !!(SUPA_URL && SUPA_KEY);
-const api = (path, opt = {}) => fetch(`${SUPA_URL}/rest/v1/${path}`, { ...opt, headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}`, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
-const register = async (username, deviceId, car) => {
+const api = async (path, opt = {}) => {
+  const tok = await getToken();
+  return fetch(`${SUPA_URL}/rest/v1/${path}`, { ...opt, headers: { apikey: SUPA_KEY, Authorization: `Bearer ${tok || SUPA_KEY}`, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
+};
+const register = async (username, car) => {
   if (!online) return 'ok';
   try {
-    const r = await api('profiles', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ username, device_id: deviceId, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) });
-    return r.status === 409 ? 'taken' : r.ok ? 'ok' : 'err';
+    const r = await api('rpc/create_profile', { method: 'POST', body: JSON.stringify({ p_username: username, p_brand: car.brand, p_model: car.model, p_year: car.year, p_vtype: car.vtype }) });
+    const j = r.ok ? await r.json() : null;
+    return typeof j === 'string' ? j : 'err';
   } catch { return 'err'; }
 };
-const ensureProfile = (p) => online && api('profiles?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ username: p.username, device_id: p.deviceId, car_brand: p.car?.brand, car_model: p.car?.model, car_year: p.car?.year, vehicle_type: p.car?.vtype }) }).catch(() => {});
 const monthKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}`;
 const syncProfile = (p, trips) => {
   if (!online) return;
   const tt = totals(tripsOf(trips, p.vid)), mk = monthKey(new Date()), car = p.car || {};
   const mkm = trips.filter((t) => monthKey(new Date(t.start)) === mk).reduce((a, t) => a + t.dist, 0);
-  api(`profiles?username=eq.${encodeURIComponent(p.username)}&device_id=eq.${p.deviceId}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) }).catch(() => {});
+  api(`profiles?username=eq.${encodeURIComponent(p.username)}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) }).catch(() => {});
 };
 
 // ---- Bileşenler ----
@@ -272,6 +276,45 @@ function Picker({ title, options, onPick, onClose }) {
   );
 }
 
+function LoginScreen({ onDone }) {
+  const [step, setStep] = useState(0), [mail, setMail] = useState(''), [code, setCode] = useState(''), [busy, setBusy] = useState(false), [cool, setCool] = useState(0);
+  useEffect(() => { if (cool <= 0) return; const id = setTimeout(() => setCool((c) => c - 1), 1000); return () => clearTimeout(id); }, [cool]);
+  const send = async () => {
+    const e = mail.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return AlertX.alert('Geçersiz e-posta', 'E-posta adresini kontrol et.');
+    setBusy(true); const r = await sendCode(e); setBusy(false);
+    if (r === 'ok') { setMail(e); setCode(''); setStep(1); setCool(60); }
+    else AlertX.alert(r === 'wait' ? 'Biraz bekle' : 'Kod gönderilemedi', r === 'wait' ? 'Çok sık denedin. Bir dakika sonra tekrar dene.' : 'İnternetini kontrol edip tekrar dene.');
+  };
+  const verify = async () => {
+    if (code.length < 6) return;
+    setBusy(true); const r = await verifyCode(mail, code); setBusy(false);
+    if (r.user) onDone();
+    else AlertX.alert(r.error === 'bad' ? 'Kod hatalı' : 'Doğrulanamadı', r.error === 'bad' ? 'Kodu kontrol et ya da yeni kod iste.' : 'İnternetini kontrol edip tekrar dene.');
+  };
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, paddingTop: 40 }} keyboardShouldPersistTaps="handled">
+      <Image source={require('./icon.png')} style={s.logo} />
+      <Text style={s.title}>Giriş yap</Text>
+      {step === 0 ? (
+        <View>
+          <Text style={s.itemSub}>E-posta adresine 6 haneli bir kod göndereceğiz, şifre gerekmez. E-postan başkalarına gösterilmez. Daha önce ApexDrive kullandıysan hesabın aynı kullanıcı adınla bağlanır.</Text>
+          <TextInput style={s.input} value={mail} onChangeText={setMail} placeholder="e-posta" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="emailAddress" />
+          <TouchableOpacity style={s.btn} onPress={send} disabled={busy}><Text style={s.btnText}>{busy ? 'Gönderiliyor...' : 'Kod gönder'}</Text></TouchableOpacity>
+        </View>
+      ) : (
+        <View>
+          <Text style={s.itemSub}>{mail} adresine gönderilen 6 haneli kodu gir.</Text>
+          <TextInput style={[s.input, { textAlign: 'center', fontSize: 28, letterSpacing: 8 }]} value={code} onChangeText={(v) => setCode(v.replace(/\D/g, '').slice(0, 6))} placeholder="000000" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={6} autoFocus />
+          <TouchableOpacity style={s.btn} onPress={verify} disabled={busy || code.length < 6}><Text style={s.btnText}>{busy ? 'Kontrol ediliyor...' : 'Giriş yap'}</Text></TouchableOpacity>
+          <TouchableOpacity disabled={cool > 0 || busy} onPress={send}><Text style={{ color: cool > 0 ? C.dim : C.accent, textAlign: 'center', padding: 14 }}>{cool > 0 ? `Kodu tekrar gönder (${cool})` : 'Kodu tekrar gönder'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={() => setStep(0)}><Text style={{ color: C.accent, textAlign: 'center', padding: 6 }}>E-postayı değiştir</Text></TouchableOpacity>
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
 function Welcome({ existing, onDone }) {
   const [step, setStep] = useState(existing ? 1 : 0);
   const [name, setName] = useState('');
@@ -290,12 +333,11 @@ function Welcome({ existing, onDone }) {
     if (existing) return onDone({ ...existing, car: c });
     const u = name.trim().toLowerCase();
     setBusy(true);
-    const deviceId = Math.random().toString(36).slice(2) + Date.now().toString(36);
-    const res = await register(u, deviceId, c);
+    const res = await register(u, c);
     setBusy(false);
     if (res === 'taken') { setStep(0); return AlertX.alert('Bu kullanıcı adı alınmış', 'Başka bir tane dene.'); }
-    if (res === 'err') return AlertX.alert('Bağlanılamadı', 'İnternet bağlantını kontrol edip tekrar dene.');
-    onDone({ username: u, deviceId, car: c });
+    if (res !== 'ok') return AlertX.alert('Bağlanılamadı', 'İnternet bağlantını kontrol edip tekrar dene.');
+    onDone({ username: u, car: c, linked: true });
   };
   const Field = ({ label, value, onPress, off }) => (
     <TouchableOpacity style={[s.input, off && { opacity: 0.4 }]} onPress={off ? undefined : onPress}>
@@ -591,7 +633,7 @@ function LaunchSection({ runs }) {
     </View>
   );
 }
-function Profile({ me, trips, terr, launches = [], onSettings, onUpdate, onAvatar, onDelete }) {
+function Profile({ me, trips, terr, launches = [], onUpdate, onAvatar, onDelete }) {
   const [sel, setSel] = useState(null);
   useBack(!!sel, () => setSel(null));
   if (sel) return <Detail t={trips.find((x) => x.id === sel.id) || sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} onUpdate={onUpdate} />;
@@ -599,7 +641,7 @@ function Profile({ me, trips, terr, launches = [], onSettings, onUpdate, onAvata
   const lp = tt.left + tt.right ? (tt.left / (tt.left + tt.right)) * 100 : 50;
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Profil</Text><TouchableOpacity onPress={onSettings} style={{ padding: 6 }}><Ionicons name="settings-outline" size={26} color={C.text} /></TouchableOpacity></View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Profil</Text></View>
       <View style={[s.row, { alignItems: 'center' }]}>
         <TouchableOpacity onPress={onAvatar}>
           {me.avatar ? <Image style={s.avatar} source={{ uri: me.avatar }} /> : <View style={[s.avatar, { alignItems: 'center', justifyContent: 'center' }]}><Ionicons name="camera" size={28} color={C.dim} /></View>}
@@ -2128,7 +2170,17 @@ function ClubsScreen({ me, onClose }) {
   );
 }
 
-function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
+const SET_CATS = [
+  ['account', 'person-circle-outline', 'Hesap', 'E-posta ve çıkış'],
+  ['look', 'color-palette-outline', 'Görünüm', 'Tema'],
+  ['drive', 'speedometer-outline', 'Sürüş ve veriler', 'Rota kaydı saklama süresi'],
+  ['privacy', 'lock-closed-outline', 'Gizlilik ve konum', 'Görünürlük ve hikaye kapsamı'],
+  ['notif', 'notifications-outline', 'Bildirimler', 'Gazlama bildirimleri, arka plan izinleri'],
+  ['server', 'server-outline', 'Sunucu', 'Bağlantı testi'],
+  ['update', 'cloud-download-outline', 'Güncelleme', 'Sürüm ve güncelleme kontrolü'],
+];
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, onSignOut }) {
+  const [cat, setCat] = useState(autoCheck ? 'update' : null);
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
@@ -2164,31 +2216,73 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck }) {
   const openAuto = async () => { try { await IntentLauncher.startActivityAsync('miui.intent.action.OP_AUTO_START'); } catch { try { await IntentLauncher.startActivityAsync('android.settings.APPLICATION_DETAILS_SETTINGS', { data: pkg }); } catch { Linking.openSettings(); } } };
   const msg = { idle: '', checking: 'Kontrol ediliyor...', latest: 'En son sürümü kullanıyorsun.', err: 'Kontrol edilemedi. İnternetini kontrol et.', norepo: 'Güncelleme adresi tanımlı değil. Derleme dosyasını güncelleyip yeniden derlemen gerekiyor.', busy: 'İndiriliyor, kurulum ekranı açılacak...', new: rel ? `Yeni sürüm hazır (#${rel.n}).` : '' }[st];
   const Box = ({ title, sub, children }) => <View style={[s.card, { marginBottom: 12, flexBasis: undefined }]}><Text style={s.itemTitle}>{title}</Text>{!!sub && <Text style={[s.itemSub, { marginTop: 4 }]}>{sub}</Text>}{children}</View>;
+  const back = () => (cat ? setCat(null) : onClose());
+  const cats = online ? SET_CATS : SET_CATS.filter((c) => c[0] !== 'account');
+  const pages = {
+    account: (
+      <>
+        <Box title="E-posta" sub="Giriş e-postan başkalarına gösterilmez."><Text style={[s.itemTitle, { marginTop: 10 }]}>{email || '—'}</Text></Box>
+        <Box title="Kullanıcı adı"><Text style={[s.itemTitle, { marginTop: 10 }]}>{username}</Text></Box>
+        <TouchableOpacity style={[s.btn, { backgroundColor: '#FF453A22' }]} onPress={onSignOut}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Çıkış yap</Text></TouchableOpacity>
+      </>
+    ),
+    look: (
+      <Box title="Tema" sub="Uygulamanın renk düzeni."><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
+    ),
+    drive: (
+      <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
+    ),
+    privacy: (
+      <>
+        <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈100 m) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
+        <Box title="Hikaye kapsamı" sub="Hikayeler sekmesinde hangi sürücüleri göreceğini seçer."><Chips opts={[['İlçe', 'ilce'], ['İl', 'il']]} val={prefs.scope || 'il'} onPick={(v) => setPrefs({ ...prefs, scope: v })} /></Box>
+      </>
+    ),
+    notif: (
+      <>
+        <Box title="Gazlama bildirimleri" sub="Günde 3 kez, rastgele saatlerde (10:00–21:30 arası) sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlanır."><Chips opts={[['Kapalı', 0], ['Açık', 1]]} val={prefs.daily ? 1 : 0} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
+        {Platform.OS === 'android' && (
+          <Box title="Arka planda bildirim" sub="Uygulama kapalıyken yeni sürüm bildiriminin gelmesi için telefonun uygulamayı arka planda çalıştırmasına izin vermesi gerekir. Xiaomi/POCO'da iki ayarı da aç.">
+            <TouchableOpacity style={s.btn} onPress={openBattery}><Text style={s.btnText}>Pil kısıtlamasını kaldır</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={openAuto}><Text style={[s.btnText, { color: C.text }]}>Otomatik başlatma izni</Text></TouchableOpacity>
+          </Box>
+        )}
+      </>
+    ),
+    server: (
+      <Box title="Sunucu" sub="Sıralama, kulüpler ve hikayeler için.">
+        {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
+        <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
+      </Box>
+    ),
+    update: (
+      <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}${RP.SHA ? ' · ' + RP.SHA : ''}`}>
+        {!!msg && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{msg}</Text>}
+        <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
+        {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
+      </Box>
+    ),
+  };
+  const cur = cats.find((c) => c[0] === cat);
   return (
-    <Modal visible animationType="slide" onRequestClose={onClose}>
+    <Modal visible animationType="slide" onRequestClose={back}>
       <SafeAreaView style={s.root}>
         <ScrollView contentContainerStyle={{ padding: 20 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}><Text style={s.title}>Ayarlar</Text><TouchableOpacity onPress={onClose} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
-          <Box title="Görünüm"><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
-          <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
-          <Box title="Yakındakilere görün" sub="Açıksan yakındaki sürücüler seni yaklaşık konumunla (≈100 m) hikaye haritasında görür."><Chips opts={[['Kapalı', false], ['Açık', true]]} val={prefs.visible} onPick={(v) => setPrefs({ ...prefs, visible: v })} /></Box>
-          <Box title="Hikaye kapsamı" sub="Hikayeler sekmesinde hangi sürücüleri göreceğini seçer."><Chips opts={[['İlçe', 'ilce'], ['İl', 'il']]} val={prefs.scope || 'il'} onPick={(v) => setPrefs({ ...prefs, scope: v })} /></Box>
-          <Box title="Gazlama bildirimleri" sub="Günde 3 kez, rastgele saatlerde (10:00–21:30 arası) sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlanır."><Chips opts={[['Kapalı', 0], ['Açık', 1]]} val={prefs.daily ? 1 : 0} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
-          {Platform.OS === 'android' && (
-            <Box title="Arka planda bildirim" sub="Uygulama kapalıyken yeni sürüm bildiriminin gelmesi için telefonun uygulamayı arka planda çalıştırmasına izin vermesi gerekir. Xiaomi/POCO'da iki ayarı da aç.">
-              <TouchableOpacity style={s.btn} onPress={openBattery}><Text style={s.btnText}>Pil kısıtlamasını kaldır</Text></TouchableOpacity>
-              <TouchableOpacity style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={openAuto}><Text style={[s.btnText, { color: C.text }]}>Otomatik başlatma izni</Text></TouchableOpacity>
-            </Box>
-          )}
-          <Box title="Sunucu" sub="Sıralama, kulüpler ve hikayeler için.">
-            {!!sv && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{sv}</Text>}
-            <TouchableOpacity style={s.btn} onPress={ping}><Text style={s.btnText}>Bağlantıyı dene</Text></TouchableOpacity>
-          </Box>
-          <Box title="Güncelleme" sub={`Kurulu sürüm: derleme #${BUILD}${RP.SHA ? ' · ' + RP.SHA : ''}`}>
-            {!!msg && <Text style={[s.itemSub, { marginTop: 10, color: C.text }]}>{msg}</Text>}
-            <TouchableOpacity style={s.btn} disabled={st === 'checking' || st === 'busy'} onPress={st === 'new' ? update : check}><Text style={s.btnText}>{st === 'new' ? 'Güncelle' : 'Güncellemeleri kontrol et'}</Text></TouchableOpacity>
-            {Platform.OS === 'android' && <Text style={[s.hint, { textAlign: 'left' }]}>İlk güncellemede telefon "bu kaynaktan kuruluma izin ver" diye sorabilir.</Text>}
-          </Box>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+              {!!cat && <TouchableOpacity onPress={back} style={{ padding: 6, marginRight: 4 }}><Ionicons name="chevron-back" size={28} color={C.accent} /></TouchableOpacity>}
+              <Text style={[s.title, { marginBottom: 0, flexShrink: 1 }]} numberOfLines={1}>{cur ? cur[2] : 'Ayarlar'}</Text>
+            </View>
+            <TouchableOpacity onPress={onClose} style={{ padding: 6 }}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity>
+          </View>
+          {!cat && cats.map(([k, ic, ti, sub]) => (
+            <TouchableOpacity key={k} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 14 }]} onPress={() => setCat(k)}>
+              <Ionicons name={ic} size={26} color={C.accent} />
+              <View style={{ flex: 1 }}><Text style={s.itemTitle}>{ti}</Text><Text style={s.itemSub}>{sub}</Text></View>
+              <Ionicons name="chevron-forward" size={20} color={C.dim} />
+            </TouchableOpacity>
+          ))}
+          {!!cat && !!cur && pages[cat]}
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -2430,6 +2524,11 @@ function NewsSheet({ items, onClose }) {
 }
 function AppInner({ ready }) {
   const sysScheme = useColorScheme();
+  const [acct, setAcct] = useState('loading'), [link, setLink] = useState('wait');
+  useEffect(() => {
+    if (!online) { setAcct('in'); setLink('ok'); return; }
+    restore().then((u) => setAcct(u ? 'in' : 'out')).catch(() => setAcct('out'));
+  }, []);
   const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1, scope: 'il' });
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
@@ -2444,7 +2543,6 @@ function AppInner({ ready }) {
   const [profile, setProfile] = useState(undefined);
   const [friends, setFriends] = useState([]);
   const [shareTrip, setShareTrip] = useState(null);
-  useEffect(() => { if (profile) ensureProfile(profile); }, [profile?.username]);
   const [docsBy, setDocsBy] = useState({});
   const [rem, setRem] = useState({ start: 30, freq: 1, hour: 9 });
   const vLoaded = useRef(false), vidRef = useRef('v0');
@@ -2550,8 +2648,40 @@ function AppInner({ ready }) {
     setShareTrip(t);
   };
 
-  useEffect(() => { if (profile && trips.length) Promise.resolve(ensureProfile(profile)).then(() => syncProfile(profile, trips)); }, [profile, trips.length]);
+  useEffect(() => { if (profile && trips.length && acct === 'in' && link !== 'wait') syncProfile(profile, trips); }, [profile, trips.length, acct, link]);
   const saveProfile = (p0) => { if (profile === null) AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); const p = initGarage(p0); setProfile(p); AsyncStorage.setItem(PKEY, JSON.stringify(p)).catch(() => {}); };
+
+  // Hesap bağlama: eski kullanıcı kendi kullanıcı adını sahiplenir, yeni telefonda profil sunucudan geri gelir
+  useEffect(() => {
+    if (acct !== 'in' || profile === undefined || link !== 'wait' || !online) return;
+    if (profile && profile.linked) { setLink('ok'); return; }
+    let live = true;
+    const tmo = (p) => Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error('timeout')), 15000))]);
+    (async () => {
+      const done = (v) => { if (live) setLink(v); };
+      try {
+        const r = await tmo(api('rpc/my_profile', { method: 'POST', body: '{}' }));
+        if (!r.ok) return done(profile ? 'ok' : 'err');
+        const rows = await r.json(), p = Array.isArray(rows) ? rows[0] : null;
+        if (p) {
+          if (!profile || profile.username !== p.username) saveProfile({ username: p.username, linked: true, car: p.car_brand ? { brand: p.car_brand, model: p.car_model, year: p.car_year, vtype: p.vehicle_type || 'car' } : undefined });
+          else saveProfile({ ...profile, linked: true });
+          return done('ok');
+        }
+        if (profile && profile.username) {
+          const c = await (await tmo(api('rpc/claim_profile', { method: 'POST', body: JSON.stringify({ p_username: profile.username, p_device_id: profile.deviceId || '' }) }))).json();
+          if (c === 'ok' || c === 'has') { saveProfile({ ...profile, linked: true }); return done('ok'); }
+          if (typeof c !== 'string' || c === 'auth') return done('ok');
+          if (profile.car && (await tmo(register(profile.username, profile.car))) === 'ok') { saveProfile({ ...profile, linked: true }); return done('ok'); }
+          AsyncStorage.removeItem(PKEY).catch(() => {});
+          setProfile(null);
+          AlertX.alert('Bu kullanıcı adı başka bir hesaba ait', 'Yeni bir kullanıcı adı seç. Sürüşlerin telefonunda kalır.');
+        }
+        done('need');
+      } catch { done(profile ? 'ok' : 'err'); }
+    })();
+    return () => { live = false; };
+  }, [acct, profile === undefined, link]);
   const pickAvatar = async () => {
     try {
       const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1] });
@@ -2611,7 +2741,7 @@ function AppInner({ ready }) {
           if (th) saveProfile({ ...profile, thumb: th });
         } catch {}
       }
-      if (th) api(`profiles?username=eq.${profile.username}&device_id=eq.${profile.deviceId}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ avatar: th }) }).catch(() => {});
+      if (th) api(`profiles?username=eq.${profile.username}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ avatar: th }) }).catch(() => {});
     })();
   }, [ready, profile && profile.thumb, profile && profile.avatar]);
   const cells = useMemo(() => [...new Set([...cellStore, ...cellsOf([route])])], [cellStore, route]);
@@ -2671,10 +2801,15 @@ function AppInner({ ready }) {
   const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); };
 
   ME.car = profile && profile.car ? `${profile.car.brand} ${profile.car.model}` : '';
-  if (profile === undefined) return <View style={s.root} />;
-  if (profile === null) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
-  if (!profile.car) return <SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} /><Welcome existing={profile} onDone={saveProfile} /></SafeAreaView></SafeAreaProvider>;
+  const shell = (child) => (<SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} />{child}<DialogHost dlg={dlg} onClose={() => setDlg(null)} /></SafeAreaView></SafeAreaProvider>);
+  if (profile === undefined || (online && acct === 'loading')) return <View style={s.root} />;
+  if (online && acct === 'out') return shell(<LoginScreen onDone={() => { setLink('wait'); setAcct('in'); }} />);
+  if (online && link === 'wait' && !(profile && profile.linked)) return shell(<View style={s.center}><ActivityIndicator color={C.accent} /></View>);
+  if (online && link === 'err') return shell(<View style={s.center}><Text style={s.itemSub}>Hesabına ulaşılamadı. İnternetini kontrol et.</Text><TouchableOpacity style={s.btn} onPress={() => setLink('wait')}><Text style={s.btnText}>Tekrar dene</Text></TouchableOpacity></View>);
+  if (profile === null) return shell(<Welcome onDone={saveProfile} />);
+  if (!profile.car) return shell(<Welcome existing={profile} onDone={saveProfile} />);
   const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
+  const doSignOut = () => AlertX.alert('Çıkış yapılsın mı?', 'Sürüş kayıtların bu telefonda kalır. Tekrar giriş yapınca hesabına bağlanırsın.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkış yap', style: 'destructive', onPress: async () => { await signOut(); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out'); } }]);
   const selectVehicle = (id) => saveProfile(pickVehicle(profile, id));
   const addVehicle = (v) => saveProfile(withVehicle(profile, v));
   const editVehicle = (v) => saveProfile(updateVehicle(profile, activeV, v));
@@ -2703,7 +2838,7 @@ function AppInner({ ready }) {
           {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onEdit={editVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
-          {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onSettings={() => setSettingsOpen(true)} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
+          {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
         <View style={s.navWrap} pointerEvents="box-none">
           <View style={s.pill}>
@@ -2728,6 +2863,11 @@ function AppInner({ ready }) {
               {[['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control']].map(([k, ic, l]) => (
                 <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
               ))}
+              <View style={{ flex: 1 }} />
+              <View style={{ height: 1, backgroundColor: C.line, marginBottom: 6 }} />
+              <TouchableOpacity style={s.dItem} onPress={() => { setMenu(false); setSettingsOpen(true); }}>
+                <Ionicons name="settings-outline" size={24} color={C.accent} /><Text style={s.itemTitle}>Ayarlar</Text>
+              </TouchableOpacity>
             </View>
             <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenu(false)} />
           </View>
@@ -2735,7 +2875,7 @@ function AppInner({ ready }) {
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
-        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
         {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
@@ -2845,7 +2985,7 @@ const mk = () => StyleSheet.create({
   hdr: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingTop: 4 },
   hdrT: { color: C.text, fontSize: 18, fontWeight: '800', fontStyle: 'italic', marginLeft: 6 },
   dBg: { flex: 1, flexDirection: 'row', backgroundColor: '#0009' },
-  dPanel: { width: 280, backgroundColor: C.bg, padding: 20, paddingTop: 56 },
+  dPanel: { width: 280, backgroundColor: C.bg, padding: 20, paddingTop: 56, paddingBottom: 28 },
   dItem: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 16 },
   rbar: { height: 6, borderRadius: 3, backgroundColor: C.line, marginTop: 10, overflow: 'hidden' },
   rfill: { height: 6, backgroundColor: C.accent },
