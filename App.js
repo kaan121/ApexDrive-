@@ -24,7 +24,7 @@ import * as Sharing from 'expo-sharing';
 import { captureRef } from 'react-native-view-shot';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { restore, sendCode, verifyCode, getToken, signOut, sess } from './auth';
+import { restore, signIn, signUp, getToken, signOut, sess } from './auth';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: '#2E4545' };
@@ -507,40 +507,35 @@ function CareScreen({ vehicle, vid, driven, onClose }) {
 }
 
 function LoginScreen({ onDone }) {
-  const [step, setStep] = useState(0), [mail, setMail] = useState(''), [code, setCode] = useState(''), [busy, setBusy] = useState(false), [cool, setCool] = useState(0);
-  useEffect(() => { if (cool <= 0) return; const id = setTimeout(() => setCool((c) => c - 1), 1000); return () => clearTimeout(id); }, [cool]);
-  const send = async () => {
+  const [mode, setMode] = useState('in'), [mail, setMail] = useState(''), [pw, setPw] = useState(''), [pw2, setPw2] = useState(''), [busy, setBusy] = useState(false);
+  const up = mode === 'up';
+  const submit = async () => {
     const e = mail.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return AlertX.alert('Geçersiz e-posta', 'E-posta adresini kontrol et.');
-    setBusy(true); const r = await sendCode(e); setBusy(false);
-    if (r === 'ok') { setMail(e); setCode(''); setStep(1); setCool(60); }
-    else AlertX.alert(r === 'wait' ? 'Biraz bekle' : 'Kod gönderilemedi', r === 'wait' ? 'Çok sık denedin. Bir dakika sonra tekrar dene.' : 'İnternetini kontrol edip tekrar dene.');
-  };
-  const verify = async () => {
-    if (code.length < 6) return;
-    setBusy(true); const r = await verifyCode(mail, code); setBusy(false);
-    if (r.user) onDone();
-    else AlertX.alert(r.error === 'bad' ? 'Kod hatalı' : 'Doğrulanamadı', r.error === 'bad' ? 'Kodu kontrol et ya da yeni kod iste.' : 'İnternetini kontrol edip tekrar dene.');
+    if (pw.length < 8) return AlertX.alert('Şifre kısa', 'Şifre en az 8 karakter olmalı.');
+    if (up && pw !== pw2) return AlertX.alert('Şifreler uyuşmuyor', 'İki şifreyi aynı yaz.');
+    setBusy(true); const r = await (up ? signUp(e, pw) : signIn(e, pw)); setBusy(false);
+    if (r.user) return onDone();
+    const m = {
+      bad: ['Giriş yapılamadı', 'E-posta ya da şifre hatalı.'],
+      exists: ['Bu e-posta zaten kayıtlı', '"Giriş yap" sekmesinden şifrenle gir.'],
+      weak: ['Şifre çok zayıf', 'Harf ve rakam karışık, daha uzun bir şifre dene.'],
+      wait: ['Biraz bekle', 'Çok sık denedin. Bir dakika sonra tekrar dene.'],
+      confirm: ['E-posta doğrulaması açık', 'Sunucuda e-posta doğrulaması açık olduğu için giriş tamamlanamadı. Bu ayarın kapatılması gerekiyor.'],
+    }[r.error] || ['Bağlanılamadı', 'İnternetini kontrol edip tekrar dene.'];
+    AlertX.alert(m[0], m[1]);
   };
   return (
     <ScrollView contentContainerStyle={{ padding: 24, paddingTop: 40 }} keyboardShouldPersistTaps="handled">
       <Image source={require('./icon.png')} style={s.logo} />
-      <Text style={s.title}>Giriş yap</Text>
-      {step === 0 ? (
-        <View>
-          <Text style={s.itemSub}>E-posta adresine 6 haneli bir kod göndereceğiz, şifre gerekmez. E-postan başkalarına gösterilmez. Daha önce ApexDrive kullandıysan hesabın aynı kullanıcı adınla bağlanır.</Text>
-          <TextInput style={s.input} value={mail} onChangeText={setMail} placeholder="e-posta" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="emailAddress" />
-          <TouchableOpacity style={s.btn} onPress={send} disabled={busy}><Text style={s.btnText}>{busy ? 'Gönderiliyor...' : 'Kod gönder'}</Text></TouchableOpacity>
-        </View>
-      ) : (
-        <View>
-          <Text style={s.itemSub}>{mail} adresine gönderilen 6 haneli kodu gir.</Text>
-          <TextInput style={[s.input, { textAlign: 'center', fontSize: 28, letterSpacing: 8 }]} value={code} onChangeText={(v) => setCode(v.replace(/\D/g, '').slice(0, 6))} placeholder="000000" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={6} autoFocus />
-          <TouchableOpacity style={s.btn} onPress={verify} disabled={busy || code.length < 6}><Text style={s.btnText}>{busy ? 'Kontrol ediliyor...' : 'Giriş yap'}</Text></TouchableOpacity>
-          <TouchableOpacity disabled={cool > 0 || busy} onPress={send}><Text style={{ color: cool > 0 ? C.dim : C.accent, textAlign: 'center', padding: 14 }}>{cool > 0 ? `Kodu tekrar gönder (${cool})` : 'Kodu tekrar gönder'}</Text></TouchableOpacity>
-          <TouchableOpacity onPress={() => setStep(0)}><Text style={{ color: C.accent, textAlign: 'center', padding: 6 }}>E-postayı değiştir</Text></TouchableOpacity>
-        </View>
-      )}
+      <Text style={s.title}>{up ? 'Hesap oluştur' : 'Giriş yap'}</Text>
+      <Chips opts={[['Giriş yap', 'in'], ['Hesap oluştur', 'up']]} val={mode} onPick={(v) => { setMode(v); setPw2(''); }} />
+      <Text style={[s.itemSub, { marginTop: 14 }]}>E-postan başkalarına gösterilmez. Daha önce ApexDrive kullandıysan hesabın aynı kullanıcı adınla bağlanır.</Text>
+      <TextInput style={s.input} value={mail} onChangeText={setMail} placeholder="e-posta" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="emailAddress" />
+      <TextInput style={s.input} value={pw} onChangeText={setPw} placeholder="şifre (en az 8 karakter)" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType={up ? 'newPassword' : 'password'} />
+      {up && <TextInput style={s.input} value={pw2} onChangeText={setPw2} placeholder="şifre (tekrar)" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType="newPassword" />}
+      {up && <Text style={s.hint}>Şifre sıfırlama şu an yok, şifreni unutma.</Text>}
+      <TouchableOpacity style={s.btn} onPress={submit} disabled={busy}><Text style={s.btnText}>{busy ? 'Bekleyin...' : up ? 'Hesap oluştur' : 'Giriş yap'}</Text></TouchableOpacity>
     </ScrollView>
   );
 }

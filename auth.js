@@ -50,17 +50,30 @@ export async function restore() {
   return still ? 'offline' : null;
 }
 
-export async function sendCode(email) {
+// Sonuç: { user } ya da { error: 'bad' | 'wait' | 'confirm' | 'err' }
+export async function signIn(email, password) {
   try {
-    const r = await post('otp', { email, create_user: true });
-    return r.ok ? 'ok' : r.status === 429 ? 'wait' : 'err';
-  } catch { return 'err'; }
+    const r = await post('token?grant_type=password', { email, password });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.access_token) { await setSession(j); return { user: j.user }; }
+    if (r.status === 429) return { error: 'wait' };
+    if (j.error_code === 'email_not_confirmed') return { error: 'confirm' };
+    return { error: r.status >= 500 ? 'err' : 'bad' };
+  } catch { return { error: 'err' }; }
 }
-export async function verifyCode(email, token) {
+// Sonuç: { user } ya da { error: 'exists' | 'weak' | 'wait' | 'confirm' | 'err' }
+// 'confirm': sunucuda "Confirm email" açık, oturum verilmedi.
+export async function signUp(email, password) {
   try {
-    const r = await post('verify', { type: 'email', email, token });
-    if (!r.ok) return { error: r.status >= 500 ? 'err' : 'bad' };
-    const j = await r.json();
+    const r = await post('signup', { email, password });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (r.status === 429) return { error: 'wait' };
+      if (j.error_code === 'user_already_exists') return { error: 'exists' };
+      if (j.error_code === 'weak_password') return { error: 'weak' };
+      return { error: r.status >= 500 ? 'err' : 'bad' };
+    }
+    if (!j.access_token) return { error: 'confirm' };
     await setSession(j);
     return { user: j.user };
   } catch { return { error: 'err' }; }
