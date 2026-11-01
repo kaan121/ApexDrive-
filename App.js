@@ -12,7 +12,7 @@ import * as CFG from './config';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { GH_REPO, BUILD } from './repo';
 import * as RP from './repo';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, Alert, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, Keyboard, AppState, BackHandler, Vibration, useColorScheme } from 'react-native';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, ScrollView, Modal, Image, TextInput, RefreshControl, Dimensions, Platform, Linking, ActivityIndicator, Animated, Easing, PanResponder, Keyboard, AppState, BackHandler, Vibration, useColorScheme } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SUPA_URL, SUPA_KEY } from './config';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -194,14 +194,6 @@ const syncProfile = (p, trips) => {
 };
 
 // ---- Bileşenler ----
-function Stat({ label, value, unit, color }) {
-  return (
-    <View style={s.stat}>
-      <Text style={s.statLabel}>{label}</Text>
-      <Text style={[s.statValue, color && { color }]}>{value}<Text style={s.unit}> {unit}</Text></Text>
-    </View>
-  );
-}
 const Grid = ({ children }) => <View style={s.grid}>{children}</View>;
 const Card = ({ icon, color, label, value, unit, wide }) => (
   <View style={[s.card, wide && { flexBasis: '100%' }]}>
@@ -253,7 +245,6 @@ function Drive({ on, live, onStart, onStop }) {
 }
 
 const CAR_MAP = Object.fromEntries(`Alfa Romeo:Giulia,Giulietta,Stelvio,Tonale,MiTo;Audi:A1,A3,A4,A5,A6,Q2,Q3,Q5,Q7,TT,RS3,RS6;BMW:1 Serisi,2 Serisi,3 Serisi,4 Serisi,5 Serisi,X1,X3,X5,M2,M3,M4,M5;Chevrolet:Aveo,Cruze,Captiva,Camaro,Corvette;Citroën:C3,C4,C5,C-Elysée,Berlingo;Cupra:Formentor,Leon,Born;Dacia:Duster,Sandero,Logan,Jogger,Spring;Fiat:Egea,Linea,Punto,500,Doblo,Panda,Tipo;Ford:Fiesta,Focus,Mondeo,Kuga,Puma,Mustang,Ranger,Courier;Honda:Civic,City,Accord,Jazz,CR-V,HR-V;Hyundai:i10,i20,i30,Elantra,Bayon,Tucson,Kona,Ioniq 5;Jeep:Renegade,Compass,Wrangler,Cherokee;Kia:Picanto,Rio,Ceed,Sportage,Sorento,Stonic,EV6;Land Rover:Defender,Discovery,Evoque,Range Rover;Mazda:2,3,6,CX-3,CX-5,MX-5;Mercedes-Benz:A Serisi,C Serisi,E Serisi,S Serisi,CLA,GLA,GLC,AMG GT;Mini:Cooper,Countryman;Mitsubishi:Lancer,ASX,L200,Outlander;Nissan:Micra,Juke,Qashqai,X-Trail,GT-R,370Z;Opel:Corsa,Astra,Insignia,Mokka,Crossland,Grandland;Peugeot:208,301,308,408,508,2008,3008;Porsche:911,Cayenne,Macan,Panamera,Taycan;Renault:Clio,Megane,Taliant,Captur,Kadjar,Austral,Symbol,Fluence,Talisman,Koleos;Seat:Ibiza,Leon,Arona,Ateca;Škoda:Fabia,Scala,Octavia,Superb,Kamiq,Karoq,Kodiaq;Subaru:Impreza,WRX,Forester,XV;Suzuki:Swift,Vitara,SX4,Jimny;Tesla:Model 3,Model S,Model X,Model Y;Toyota:Yaris,Corolla,Auris,C-HR,RAV4,Hilux,Supra,GR86;Togg:T10X;Volkswagen:Polo,Golf,Passat,Jetta,Tiguan,T-Roc,Arteon,Scirocco;Volvo:S60,S90,V40,XC40,XC60,XC90`.split(';').map((x) => { const [b, m] = x.split(':'); return [b, m.split(',')]; }));
-const BRANDS = Object.keys(CAR_MAP).sort((a, b) => a.localeCompare(b, 'tr'));
 const YEARS = Array.from({ length: 48 }, (_, i) => String(2027 - i));
 const MOTO_MAP = Object.fromEntries(`Aprilia:RS 660,Tuono 660,RSV4,Tuono V4;Benelli:TRK 502,Leoncino 500,302R;BMW:G 310 R,F 900 R,F 900 XR,R 1250 GS,R 1300 GS,S 1000 RR,S 1000 R;CFMOTO:250NK,450SR,650NK,800MT;Ducati:Monster,Panigale V2,Panigale V4,Multistrada V4,Streetfighter V4,Scrambler,Diavel;Harley-Davidson:Sportster S,Iron 883,Street Glide,Fat Boy,Road King;Honda:CBR250R,CBR500R,CBR650R,CBR1000RR,CB650R,CB125R,Africa Twin,PCX,Forza 350,Transalp;Husqvarna:Svartpilen 401,Vitpilen 401,Norden 901;Kawasaki:Ninja 250,Ninja 400,Ninja 650,ZX-6R,ZX-10R,Z650,Z900,Versys 650,Versys 1000;KTM:Duke 125,Duke 390,Duke 790,Duke 890,RC 390,390 Adventure,1290 Super Duke R;Kymco:Agility,Downtown,Xciting;Moto Guzzi:V7,V85 TT;MV Agusta:Brutale 800,F3;Royal Enfield:Classic 350,Himalayan,Interceptor 650,Continental GT 650,Meteor 350;Suzuki:GSX-R600,GSX-R750,GSX-R1000,GSX-S750,GSX-S1000,V-Strom 650,V-Strom 1050,Hayabusa,Burgman 400;SYM:Symphony,Joyride,Maxsym;Triumph:Street Triple,Speed Triple,Trident 660,Tiger 900,Tiger 1200,Bonneville T120,Daytona 660;Vespa:Primavera,GTS 300,Sprint;Yamaha:R25,R3,R6,R1,MT-03,MT-07,MT-09,Tracer 9,XMAX,NMAX,Tenere 700`.split(';').map((x) => { const [b, m] = x.split(':'); return [b, m.split(',')]; }));
 
@@ -949,7 +940,6 @@ window.setSat=function(on){if(on){map.removeLayer(dk);st.addTo(map);}else{map.re
 var grp=L.layerGroup().addTo(map),cg=L.layerGroup().addTo(map),gg=L.layerGroup().addTo(map),pts=[],me=null,S=500,R=6378137,ks=[],gridOn=false;
 function col(v){return v==null?'#6EC7C7':v<50?'#4FD1C5':v<90?'#34C759':v<120?'#FF9500':'#FF453A';}
 function inv(x,y){return [(2*Math.atan(Math.exp(y/R))-Math.PI/2)*180/Math.PI,x/R*180/Math.PI];}
-map.on('dragend',function(){var c=map.getCenter();window.ReactNativeWebView.postMessage(JSON.stringify({lat:c.lat,lng:c.lng}));});
 window.setRoute=function(p){grp.clearLayers();pts=p;if(p.length<2)return;var cur=[[p[0][0],p[0][1]]],c=col(p[1][2]);
 for(var i=1;i<p.length;i++){var k=col(p[i][2]);if(k!==c){L.polyline(cur,{color:c,weight:5}).addTo(grp);cur=[cur[cur.length-1]];c=k;}cur.push([p[i][0],p[i][1]]);}
 L.polyline(cur,{color:c,weight:5}).addTo(grp);};
@@ -980,7 +970,7 @@ window.fit=function(){if(pts.length>1)map.fitBounds(L.latLngBounds(pts.map(funct
 window.setMe=function(la,lo,go){var ll=[la,lo];if(!me)me=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#6EC7C7',fillOpacity:1}).addTo(map);else me.setLatLng(ll);if(go)map.setView(ll,Math.max(map.getZoom(),15),{animate:true});};
 </script></body></html>`;
 
-function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me, follow, fit, interactive = true, onMove, style }) {
+function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me, follow, fit, interactive = true, style }) {
   const ref = useRef(null);
   const [ready, setReady] = useState(false);
   const html = useRef(leafletHtml(interactive)).current;
@@ -1002,7 +992,7 @@ function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me
       originWhitelist={['*']}
       source={{ html, baseUrl: 'https://apexdrive.app' }}
       onLoadEnd={() => setReady(true)}
-      onMessage={(e) => { try { const m = JSON.parse(e.nativeEvent.data); if (m.t === 'person') onPerson && onPerson(m.u); else if (m.t) onTick && onTick(m); else onMove && onMove(m.lat, m.lng); } catch {} }}
+      onMessage={(e) => { try { const m = JSON.parse(e.nativeEvent.data); if (m.t === 'person') onPerson && onPerson(m.u); else if (m.t) onTick && onTick(m); } catch {} }}
       scrollEnabled={false}
       nestedScrollEnabled
       overScrollMode="never"
@@ -1721,7 +1711,7 @@ function Wave({ seed, total, start, len, onChange, onEnd }) {
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: () => { g.s0 = P.current.start; },
-    onPanResponderMove: (e, gs) => { const n = Math.max(0, Math.min(P.current.total - P.current.len, g.s0 - gs.dx / pps)); P.current.onChange(Math.round(n * 2) / 2); },
+    onPanResponderMove: (_, gs) => { const n = Math.max(0, Math.min(P.current.total - P.current.len, g.s0 - gs.dx / pps)); P.current.onChange(Math.round(n * 2) / 2); },
     onPanResponderRelease: () => P.current.onEnd(),
   })).current;
   const wl = (W - len * pps) / 2;
@@ -1886,7 +1876,7 @@ function StoryEditor({ uri, onDone, onCancel, busy: pb }) {
     try {
       const b = await captureRef(shot, { format: 'jpg', quality: 0.65, result: 'base64', width: 720, height: Math.round(720 * SR[ri][1]) });
       const mi = items.filter((x) => x.kind === 'music').pop();
-      onDone(b, SR[ri][1], mi ? { title: mi.m.title, artist: mi.m.artist, art: mi.m.art, url: mi.m.url, start: mi.m.start, len: mi.m.len } : null);
+      onDone(b, mi ? { title: mi.m.title, artist: mi.m.artist, art: mi.m.art, url: mi.m.url, start: mi.m.start, len: mi.m.len } : null);
     } catch { AlertX.alert('Hazırlanamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
     setBusy(false);
   };
@@ -1946,7 +1936,7 @@ function StoryComposer({ me, pos, onClose }) {
       } catch { onClose(); }
     })();
   }, []);
-  const post = async (b64, ratio, music) => {
+  const post = async (b64, music) => {
     setBusy(true);
     try {
       let p = pos;
@@ -3178,16 +3168,10 @@ export default function App() {
 
 const mk = () => StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
-  brand: { color: C.text, fontSize: 20, fontWeight: '800', letterSpacing: 0.5, paddingHorizontal: 20, paddingTop: 8 },
-  brand2: { color: C.accent, fontSize: 16, fontWeight: '800', marginBottom: 6 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   speed: { color: C.text, fontSize: 112, fontWeight: '800', fontVariant: ['tabular-nums'] },
   speedUnit: { color: C.dim, fontSize: 18, marginTop: -8 },
   row: { flexDirection: 'row', width: '100%', gap: 12, marginBottom: 12 },
-  stat: { flex: 1, backgroundColor: C.card, borderRadius: 24, padding: 14 },
-  statLabel: { color: C.dim, fontSize: 13 },
-  statValue: { color: C.text, fontSize: 24, fontWeight: '700', marginTop: 4 },
-  unit: { color: C.dim, fontSize: 13, fontWeight: '400' },
   btn: { backgroundColor: C.accent, borderRadius: 28, paddingVertical: 16, width: '100%', alignItems: 'center', marginTop: 16 },
   btnText: { color: '#06101F', fontSize: 17, fontWeight: '800' },
   hint: { color: C.dim, fontSize: 13, textAlign: 'center', marginTop: 14 },
@@ -3195,19 +3179,9 @@ const mk = () => StyleSheet.create({
   item: { backgroundColor: C.card, borderRadius: 24, padding: 16, marginBottom: 10 },
   itemTitle: { color: C.text, fontSize: 15, fontWeight: '600' },
   itemSub: { color: C.dim, fontSize: 13, marginTop: 4 },
-  region: { width: 120, marginRight: 12 },
-  regionImg: { width: 120, height: 80, borderRadius: 12, marginBottom: 6 },
-  overlay: { flex: 1, backgroundColor: 'rgba(5,9,18,0.7)', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  modal: { backgroundColor: C.card, borderRadius: 20, padding: 22, width: '100%' },
-  tabs: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: C.line },
-  tab: { flex: 1, alignItems: 'center', paddingVertical: 14 },
-  tabText: { color: C.dim, fontSize: 15 },
   map: { flex: 1 },
   chip: { position: 'absolute', bottom: 100, left: 12, right: 12, backgroundColor: C.card, borderRadius: 24, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10 },
   thumb: { width: 44, height: 44, borderRadius: 10, backgroundColor: C.line },
-  shot: { backgroundColor: '#12203A', borderRadius: 20, padding: 20, marginTop: 8 },
-  shotBrand: { color: C.accent, fontWeight: '800', fontSize: 16 },
-  shotBig: { color: C.text, fontSize: 54, fontWeight: '800', marginTop: 8 },
   modalBg: { flex: 1, backgroundColor: '#000A', justifyContent: 'center', padding: 24 },
   modal: { backgroundColor: C.card, borderRadius: 20, padding: 22 },
   title: { color: C.text, fontSize: 32, fontWeight: '800', fontStyle: 'italic', marginBottom: 16 },
@@ -3261,7 +3235,6 @@ const mk = () => StyleSheet.create({
   rbar: { height: 6, borderRadius: 3, backgroundColor: C.line, marginTop: 10, overflow: 'hidden' },
   rfill: { height: 6, backgroundColor: C.accent },
   sthumb: { width: 110, height: 140, borderRadius: 16, marginRight: 10, backgroundColor: C.line },
-  storyBtn: { position: 'absolute', left: 16, bottom: 176, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.accent, borderRadius: 26, paddingVertical: 12, paddingHorizontal: 16 },
   dlgBg: { flex: 1, backgroundColor: '#000B', alignItems: 'center', justifyContent: 'center', padding: 28 },
   dlg: { width: '100%', maxWidth: 340, backgroundColor: C.card, borderRadius: 28, padding: 22, borderWidth: 1, borderColor: C.line },
   dlgT: { color: C.text, fontSize: 19, fontWeight: '800' },
@@ -3287,9 +3260,6 @@ const mk = () => StyleSheet.create({
   edTools: { position: 'absolute', right: 8, top: 8, gap: 10 },
   edBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#000A', alignItems: 'center', justifyContent: 'center' },
   edTxt: { fontSize: 28, fontWeight: '800', textShadowColor: '#000A', textShadowRadius: 6, textShadowOffset: { width: 0, height: 1 } },
-  edPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#000B', borderRadius: 16, padding: 8 },
-  edPT: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  edPA: { color: '#ccc', fontSize: 12 },
   edTrash: { position: 'absolute', bottom: 14, left: '50%', marginLeft: -30, width: 60, height: 60, borderRadius: 30, backgroundColor: '#000B', alignItems: 'center', justifyContent: 'center' },
   sbadge: { position: 'absolute', right: 14, bottom: 6, color: '#fff', fontWeight: '800', fontSize: 18 },
   cvTop: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderBottomWidth: 1, borderBottomColor: C.line },
@@ -3328,7 +3298,6 @@ const mk = () => StyleSheet.create({
   newsDot: { width: 34, height: 34, borderRadius: 17, backgroundColor: C.bg, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center' },
   newsT: { color: C.dim, fontSize: 16, lineHeight: 24 },
   nbBar: { position: 'absolute', top: 64, left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1C1C21EE', borderRadius: 26, paddingVertical: 8, paddingHorizontal: 10 },
-  nbPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14, backgroundColor: C.line, alignItems: 'center' },
   nbAv: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   nbName: { color: '#fff', fontSize: 11, marginTop: 3, maxWidth: 62 },
 });
