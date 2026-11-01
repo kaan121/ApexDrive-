@@ -214,6 +214,7 @@ const Card = ({ icon, color, label, value, unit, wide }) => (
 function TripStats({ t }) {
   return (
     <Grid>
+      <Card wide icon="ribbon" color={scoreInfo(tripScore(t))[1]} label={`Sürüş puanı · ${scoreInfo(tripScore(t))[0]}`} value={tripScore(t)} unit="/ 100" />
       <Card icon="navigate" color={C.accent} label="Mesafe" value={t.dist.toFixed(1)} unit="km" />
       <Card icon="time" color={C.warn} label="Süre" value={fmtTime(t.duration)} />
       <Card icon="flash" color="#FF453A" label="Maks. hız" value={Math.round(t.max)} unit="km/s" />
@@ -271,6 +272,244 @@ function Picker({ title, options, onPick, onClose }) {
           )} />
           <TouchableOpacity onPress={onClose}><Text style={{ color: C.accent, textAlign: 'center', padding: 12 }}>Kapat</Text></TouchableOpacity>
         </View>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// ---- Sürüş puanı (0-100): fren, sert hızlanma, viraj, yüksek hız ve G kuvvetinden hesaplanır ----
+const driveScore = (t) => {
+  const km = Math.max(t.dist || 0, 3);
+  const ev = (((t.brake || 0) * 1.2 + (t.acc || 0) * 1.0 + (t.corner || 0) * 0.8) / km) * 10;
+  const pts = (t.route || []).filter((p) => p.v != null);
+  const fast = pts.length > 5 ? pts.filter((p) => p.v >= 120).length / pts.length : 0;
+  const pen = Math.min(60, ev * 8) + Math.min(20, fast * 40 + (t.max > 160 ? 5 : 0)) + Math.min(10, Math.max(0, (t.maxG || 0) - 0.5) * 20);
+  return Math.max(0, Math.min(100, Math.round(100 - pen)));
+};
+const tripScore = (t) => (t.score != null ? t.score : driveScore(t));
+const scoreInfo = (n) => (n >= 85 ? ['Çok yumuşak', '#34C759'] : n >= 70 ? ['Dengeli', '#4FD1C5'] : n >= 50 ? ['Sert', '#FF9500'] : ['Çok sert', '#FF453A']);
+const avgScore = (trips) => { const d = trips.reduce((a, t) => a + (t.dist || 0), 0); return d > 0 ? trips.reduce((a, t) => a + tripScore(t) * (t.dist || 0), 0) / d : null; };
+
+// ---- GPX dışa aktarma ----
+const gpxOf = (t) => {
+  const esc = (x) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const r = t.route || [], cum = [0];
+  for (let i = 1; i < r.length; i++) cum.push(cum[i - 1] + hav(r[i - 1], r[i]));
+  const tot = cum[cum.length - 1] || 1, name = esc('ApexDrive ' + fmtDate(t.start));
+  const pts = r.map((p, i) => `<trkpt lat="${p.latitude.toFixed(6)}" lon="${p.longitude.toFixed(6)}"><time>${new Date(t.start + (cum[i] / tot) * t.duration * 1000).toISOString()}</time></trkpt>`).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="ApexDrive" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name><time>${new Date(t.start).toISOString()}</time></metadata>\n<trk><name>${name}</name><trkseg>\n${pts}\n</trkseg></trk>\n</gpx>\n`;
+};
+async function exportGpx(t) {
+  try {
+    const f = FileSystem.cacheDirectory + `apexdrive_${t.id}.gpx`;
+    await FileSystem.writeAsStringAsync(f, gpxOf(t));
+    await Sharing.shareAsync(f, { mimeType: 'application/gpx+xml', UTI: 'com.topografix.gpx', dialogTitle: 'GPX dışa aktar' });
+  } catch { AlertX.alert('Dışa aktarılamadı', 'Tekrar dene.'); }
+}
+
+// ---- Başarımlar (rozetler) ----
+const BKEY = '@apexdrive_badges', CARE = '@apexdrive_care';
+const dayIdx = (ts) => { const d = new Date(ts); d.setHours(12, 0, 0, 0); return Math.round(d.getTime() / 864e5); };
+function computeBadges({ trips, cells, launches, regions }) {
+  const km = trips.reduce((a, t) => a + (t.dist || 0), 0), n = trips.length;
+  const longest = trips.reduce((a, t) => Math.max(a, t.dist || 0), 0);
+  const smooth = trips.some((t) => t.dist >= 10 && tripScore(t) >= 90) ? 1 : 0;
+  const night = trips.filter((t) => { const h = new Date(t.start).getHours(); return t.dist >= 10 && (h >= 22 || h < 5); }).length;
+  const days = [...new Set(trips.map((t) => dayIdx(t.start)))].sort((a, b) => a - b);
+  let streak = days.length ? 1 : 0, run = 1;
+  for (let i = 1; i < days.length; i++) { run = days[i] - days[i - 1] === 1 ? run + 1 : 1; streak = Math.max(streak, run); }
+  const prov = new Set(Object.keys(regions || {}).map((k) => k.split('|')[1]).filter(Boolean)).size;
+  const nc = (cells || []).length, nl = (launches || []).length;
+  return [
+    ['trip1', 'play-circle', 'İlk Sürüş', 'İlk sürüşünü kaydet', n, 1],
+    ['trip10', 'layers', 'Düzenli Sürücü', '10 sürüş kaydet', n, 10],
+    ['trip50', 'albums', 'Yolların Kralı', '50 sürüş kaydet', n, 50],
+    ['km100', 'navigate', 'Isınma Turu', 'Toplam 100 km sür', km, 100],
+    ['km500', 'speedometer', 'Yol Arkadaşı', 'Toplam 500 km sür', km, 500],
+    ['km1000', 'flag', 'Bin Kilometre', 'Toplam 1.000 km sür', km, 1000],
+    ['km5000', 'trophy', 'Yol Efsanesi', 'Toplam 5.000 km sür', km, 5000],
+    ['long100', 'map', 'Uzun Yol', 'Tek sürüşte 100 km yap', longest, 100],
+    ['long300', 'compass', 'Büyük Yolculuk', 'Tek sürüşte 300 km yap', longest, 300],
+    ['smooth', 'leaf', 'Yumuşak Sürücü', '10 km üstü bir sürüşte 90+ puan al', smooth, 1],
+    ['night', 'moon', 'Gece Kuşu', 'Gece (22:00-05:00) 10 km üstü sürüş yap', night, 1],
+    ['streak3', 'flame', 'Üç Gün Üst Üste', '3 gün art arda sürüş yap', streak, 3],
+    ['streak7', 'flame', 'Haftalık Seri', '7 gün art arda sürüş yap', streak, 7],
+    ['cells10', 'grid', 'Kaşif', 'Haritada 10 bölge keşfet', nc, 10],
+    ['cells50', 'grid', 'Haritacı', 'Haritada 50 bölge keşfet', nc, 50],
+    ['cells200', 'grid', 'Bölge Ustası', 'Haritada 200 bölge keşfet', nc, 200],
+    ['prov3', 'location', 'Gezgin', '3 farklı ilde sür', prov, 3],
+    ['prov10', 'earth', 'Türkiye Turu', '10 farklı ilde sür', prov, 10],
+    ['launch', 'timer', 'Çıkış Hazır', 'Launch Control ile ilk ölçümünü yap', nl, 1],
+  ].map(([id, icon, title, desc, cur, goal]) => ({ id, icon, title, desc, cur: Math.min(cur, goal), goal, done: cur >= goal }));
+}
+function AchvScreen({ badges, got, onClose }) {
+  const n = badges.filter((b) => got[b.id] || b.done).length;
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Başarımlar</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <Text style={[s.itemSub, { marginBottom: 14 }]}>{n} / {badges.length} rozet kazandın</Text>
+          {badges.map((b) => {
+            const ok = !!got[b.id] || b.done;
+            return (
+              <View key={b.id} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 14, opacity: ok ? 1 : 0.75 }]}>
+                <View style={[s.pAv, { width: 52, height: 52, borderRadius: 26, marginVertical: 0, borderColor: ok ? '#FFD60A' : C.line }]}><Ionicons name={b.icon} size={26} color={ok ? '#FFD60A' : C.dim} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.itemTitle}>{b.title}</Text>
+                  <Text style={s.itemSub}>{b.desc}</Text>
+                  {!ok && <View style={[s.rbar, { marginTop: 8 }]}><View style={[s.rfill, { width: `${Math.min(100, (b.cur / b.goal) * 100)}%` }]} /></View>}
+                </View>
+                {ok ? <Ionicons name="checkmark-circle" size={24} color="#34C759" /> : <Text style={s.itemSub}>{Math.floor(b.cur)}/{b.goal}</Text>}
+              </View>
+            );
+          })}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// ---- Bakım takibi ve yakıt / maliyet kaydı (araç başına, telefonda saklanır) ----
+const MAINT_TPL = [['Yağ değişimi', 10000, 12], ['Periyodik bakım', 15000, 12], ['Lastik değişimi', 40000, 48], ['Fren balatası', 30000, 0], ['Hava filtresi', 20000, 12], ['Akü', 0, 48], ['Triger seti', 90000, 60]];
+const toNum = (x) => { const v = parseFloat(String(x).replace(',', '.')); return isFinite(v) ? v : null; };
+const monthsLater = (ts, m) => { const x = new Date(ts); x.setMonth(x.getMonth() + m); return x; };
+const fmtMoney = (x) => `${Math.round(x || 0).toLocaleString('tr-TR')} ₺`;
+const mStatus = (m, odo) => {
+  const kmLeft = m.ikm > 0 && m.lkm != null && odo != null ? m.lkm + m.ikm - odo : null;
+  const daysLeft = m.imo > 0 ? Math.round((monthsLater(m.ldate, m.imo).getTime() - Date.now()) / 864e5) : null;
+  const bad = (kmLeft != null && kmLeft <= 0) || (daysLeft != null && daysLeft <= 0);
+  const soon = (kmLeft != null && kmLeft <= 1000) || (daysLeft != null && daysLeft <= 30);
+  return { kmLeft, daysLeft, col: bad ? '#FF453A' : soon ? C.warn : '#34C759' };
+};
+function CareScreen({ vehicle, vid, driven, onClose }) {
+  const [all, setAll] = useState(null), [tab, setTab] = useState('maint'), [form, setForm] = useState(null), kb = useKbd();
+  useEffect(() => { AsyncStorage.getItem(CARE).then((v) => setAll(v ? JSON.parse(v) : {})).catch(() => setAll({})); }, []);
+  const d = (all && all[vid]) || { odo: null, maint: [], fuel: [] };
+  const save = (nd) => { const n = { ...(all || {}), [vid]: nd }; setAll(n); AsyncStorage.setItem(CARE, JSON.stringify(n)).catch(() => {}); };
+  const odoNow = d.odo ? d.odo.km + Math.max(0, driven - d.odo.at) : null;
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const submit = () => {
+    const f = form;
+    if (f.t === 'odo') {
+      const v = toNum(f.km);
+      if (v == null || v < 0) return AlertX.alert('Geçersiz değer', 'Aracın kilometre saatindeki değeri yaz.');
+      save({ ...d, odo: { km: v, at: driven } });
+    } else if (f.t === 'maint') {
+      const name = f.name.trim(), ikm = toNum(f.ikm) || 0, imo = toNum(f.imo) || 0;
+      if (!name) return AlertX.alert('Eksik bilgi', 'Bakımın adını yaz.');
+      if (ikm <= 0 && imo <= 0) return AlertX.alert('Eksik bilgi', 'Kaç km ya da kaç ayda bir yapılacağını yaz.');
+      const lkm = toNum(f.lkm) ?? odoNow;
+      if (ikm > 0 && lkm == null) return AlertX.alert('Kilometre gerekli', 'Önce "Güncel kilometre" değerini gir ya da son yapıldığı kilometreyi yaz.');
+      const ld = f.ldate ? parseDate(f.ldate) : new Date();
+      if (!ld) return AlertX.alert('Geçersiz tarih', 'Tarihi GG.AA.YYYY olarak yaz.');
+      save({ ...d, maint: [...d.maint, { id: 'm' + Date.now(), name, ikm, imo, lkm, ldate: ld.getTime() }] });
+    } else {
+      const liters = toNum(f.liters), price = toNum(f.price) || 0, km = toNum(f.km) ?? odoNow;
+      if (!liters || liters <= 0) return AlertX.alert('Eksik bilgi', 'Kaç litre aldığını yaz.');
+      save({ ...d, fuel: [...d.fuel, { id: 'f' + Date.now(), t: Date.now(), liters, price, km, full: !!f.full }] });
+    }
+    setForm(null);
+  };
+  const done = (m) => save({ ...d, maint: d.maint.map((x) => (x.id === m.id ? { ...x, lkm: odoNow ?? x.lkm, ldate: Date.now() } : x)) });
+  const del = (kind, id) => AlertX.alert('Kayıt silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => save({ ...d, [kind]: d[kind].filter((x) => x.id !== id) }) }]);
+  const fuel = [...d.fuel].sort((a, b) => a.t - b.t);
+  const totalCost = fuel.reduce((a, f) => a + f.price, 0), totalL = fuel.reduce((a, f) => a + f.liters, 0);
+  const fulls = fuel.filter((f) => f.full && f.km != null);
+  let cons = null, cpk = null;
+  if (fulls.length >= 2) {
+    const first = fulls[0], last = fulls[fulls.length - 1], seg = fuel.filter((f) => f.t > first.t && f.t <= last.t), dist = last.km - first.km;
+    if (dist > 0) { cons = (seg.reduce((a, f) => a + f.liters, 0) / dist) * 100; cpk = seg.reduce((a, f) => a + f.price, 0) / dist; }
+  }
+  if (all === null) return <Modal visible animationType="slide" onRequestClose={onClose}><SafeAreaView style={s.root}><View style={s.center}><ActivityIndicator color={C.accent} /></View></SafeAreaView></Modal>;
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Bakım ve Yakıt</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <Text style={s.itemSub}>{vehicle ? `${vehicle.brand} ${vehicle.model}` : ''}</Text>
+          <View style={[s.card, { flexBasis: undefined, marginTop: 12, marginBottom: 12 }]}>
+            <Text style={s.cLabel}>Güncel kilometre (tahmini)</Text>
+            <Text style={s.cValue}>{odoNow != null ? Math.round(odoNow).toLocaleString('tr-TR') : '—'}<Text style={s.cUnit}> km</Text></Text>
+            <Text style={[s.itemSub, { marginTop: 6 }]}>{odoNow != null ? 'Kaydettiğin sürüşlerle kendiliğinden güncellenir. Farklıysa düzelt.' : 'Km'+"'"+'ye göre bakım takibi için aracın kilometre saatindeki değeri bir kez gir.'}</Text>
+            <TouchableOpacity style={[s.fpill, { alignSelf: 'flex-start', marginTop: 10 }]} onPress={() => setForm({ t: 'odo', km: odoNow != null ? String(Math.round(odoNow)) : '' })}><Ionicons name="create-outline" size={16} color={C.text} /><Text style={s.navText}>{odoNow != null ? 'Güncelle' : 'Kilometreyi gir'}</Text></TouchableOpacity>
+          </View>
+          <View style={{ alignItems: 'flex-start' }}><Chips opts={[['Bakım', 'maint'], ['Yakıt', 'fuel']]} val={tab} onPick={setTab} /></View>
+          {tab === 'maint' && (
+            <View style={{ marginTop: 14 }}>
+              {d.maint.length === 0 && <Text style={s.hint}>Henüz bakım eklemedin.</Text>}
+              {d.maint.map((m) => {
+                const st = mStatus(m, odoNow);
+                const parts = [st.kmLeft != null ? (st.kmLeft > 0 ? `${Math.round(st.kmLeft)} km kaldı` : `${Math.round(-st.kmLeft)} km geçti`) : null, st.daysLeft != null ? (st.daysLeft > 0 ? `${st.daysLeft} gün kaldı` : `${-st.daysLeft} gün geçti`) : null].filter(Boolean);
+                return (
+                  <View key={m.id} style={[s.item, { borderLeftWidth: 4, borderLeftColor: st.col }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <View style={{ flex: 1 }}><Text style={s.itemTitle}>{m.name}</Text><Text style={[s.itemSub, { color: st.col, fontWeight: '700' }]}>{parts.join(' · ') || 'Takip ediliyor'}</Text></View>
+                      <TouchableOpacity onPress={() => del('maint', m.id)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>
+                    </View>
+                    <Text style={s.itemSub}>Son yapılan: {fmtOut(new Date(m.ldate))}{m.lkm != null ? ` · ${Math.round(m.lkm).toLocaleString('tr-TR')} km` : ''}</Text>
+                    <TouchableOpacity style={[s.fpill, { alignSelf: 'flex-start', marginTop: 10 }]} onPress={() => done(m)}><Ionicons name="checkmark-circle" size={16} color={C.text} /><Text style={s.navText}>Yapıldı</Text></TouchableOpacity>
+                  </View>
+                );
+              })}
+              <TouchableOpacity style={s.btn} onPress={() => setForm({ t: 'maint', name: '', ikm: '', imo: '', lkm: '', ldate: '' })}><Text style={s.btnText}>Bakım ekle</Text></TouchableOpacity>
+            </View>
+          )}
+          {tab === 'fuel' && (
+            <View style={{ marginTop: 14 }}>
+              <Grid>
+                <Card icon="cash" color="#34C759" label="Toplam harcama" value={fmtMoney(totalCost)} />
+                <Card icon="water" color={C.accent} label="Toplam yakıt" value={totalL.toFixed(0)} unit="L" />
+                <Card icon="speedometer" color={C.warn} label="Ort. tüketim" value={cons != null ? cons.toFixed(1) : '—'} unit="L/100 km" />
+                <Card icon="navigate" color="#BF5AF2" label="Maliyet" value={cpk != null ? cpk.toFixed(2) : '—'} unit="₺/km" />
+              </Grid>
+              {cons == null && <Text style={[s.hint, { textAlign: 'left' }]}>Ortalama tüketim için en az iki kez "dolu depo" ve kilometre ile kayıt ekle.</Text>}
+              <Text style={s.sec}>Kayıtlar</Text>
+              {fuel.length === 0 && <Text style={s.hint}>Henüz yakıt kaydı yok.</Text>}
+              {[...fuel].reverse().map((f) => (
+                <View key={f.id} style={[s.item, { flexDirection: 'row', alignItems: 'center' }]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.itemTitle}>{f.liters.toFixed(1)} L · {fmtMoney(f.price)}</Text>
+                    <Text style={s.itemSub}>{fmtDate(f.t)}{f.km != null ? ` · ${Math.round(f.km).toLocaleString('tr-TR')} km` : ''}{f.full ? ' · dolu depo' : ''}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => del('fuel', f.id)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>
+                </View>
+              ))}
+              <TouchableOpacity style={s.btn} onPress={() => setForm({ t: 'fuel', liters: '', price: '', km: '', full: true })}><Text style={s.btnText}>Yakıt ekle</Text></TouchableOpacity>
+            </View>
+          )}
+        </ScrollView>
+        {form && (
+          <Modal visible transparent animationType="slide" onRequestClose={() => setForm(null)}>
+            <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end', paddingBottom: kb }}>
+              <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, maxHeight: '90%' }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>{form.t === 'odo' ? 'Güncel kilometre' : form.t === 'maint' ? 'Bakım ekle' : 'Yakıt ekle'}</Text><TouchableOpacity onPress={() => setForm(null)}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+                <ScrollView keyboardShouldPersistTaps="handled">
+                  {form.t === 'odo' && <TextInput style={[s.input, { marginTop: 4 }]} value={form.km} onChangeText={(v) => set('km', v.replace(/\D/g, ''))} placeholder="Kilometre saatindeki değer" placeholderTextColor={C.dim} keyboardType="number-pad" />}
+                  {form.t === 'maint' && (
+                    <View>
+                      <Chips opts={MAINT_TPL.map(([n], i) => [n, i])} val={-1} onPick={(i) => setForm({ ...form, name: MAINT_TPL[i][0], ikm: MAINT_TPL[i][1] ? String(MAINT_TPL[i][1]) : '', imo: MAINT_TPL[i][2] ? String(MAINT_TPL[i][2]) : '' })} />
+                      <TextInput style={[s.input, { marginTop: 12 }]} value={form.name} onChangeText={(v) => set('name', v)} placeholder="Bakımın adı" placeholderTextColor={C.dim} maxLength={40} />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.ikm} onChangeText={(v) => set('ikm', v.replace(/\D/g, ''))} placeholder="Kaç km'de bir? (boş bırakabilirsin)" placeholderTextColor={C.dim} keyboardType="number-pad" />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.imo} onChangeText={(v) => set('imo', v.replace(/\D/g, ''))} placeholder="Kaç ayda bir? (boş bırakabilirsin)" placeholderTextColor={C.dim} keyboardType="number-pad" />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.lkm} onChangeText={(v) => set('lkm', v.replace(/\D/g, ''))} placeholder={`Son yapıldığı km (boşsa ${odoNow != null ? Math.round(odoNow) : '—'})`} placeholderTextColor={C.dim} keyboardType="number-pad" />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.ldate} onChangeText={(v) => set('ldate', fmtD(v))} placeholder="Son yapıldığı tarih (GG.AA.YYYY, boşsa bugün)" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={10} />
+                    </View>
+                  )}
+                  {form.t === 'fuel' && (
+                    <View>
+                      <TextInput style={[s.input, { marginTop: 4 }]} value={form.liters} onChangeText={(v) => set('liters', v)} placeholder="Litre" placeholderTextColor={C.dim} keyboardType="decimal-pad" />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.price} onChangeText={(v) => set('price', v)} placeholder="Toplam tutar (₺)" placeholderTextColor={C.dim} keyboardType="decimal-pad" />
+                      <TextInput style={[s.input, { marginTop: 10 }]} value={form.km} onChangeText={(v) => set('km', v.replace(/\D/g, ''))} placeholder={`Kilometre (boşsa ${odoNow != null ? Math.round(odoNow) : '—'})`} placeholderTextColor={C.dim} keyboardType="number-pad" />
+                      <Chips opts={[['Dolu depo', true], ['Kısmi', false]]} val={form.full} onPick={(v) => set('full', v)} />
+                    </View>
+                  )}
+                  <TouchableOpacity style={s.btn} onPress={submit}><Text style={s.btnText}>Kaydet</Text></TouchableOpacity>
+                </ScrollView>
+              </View>
+            </View>
+          </Modal>
+        )}
       </SafeAreaView>
     </Modal>
   );
@@ -637,7 +876,7 @@ function Profile({ me, trips, terr, launches = [], onUpdate, onAvatar, onDelete 
   const [sel, setSel] = useState(null);
   useBack(!!sel, () => setSel(null));
   if (sel) return <Detail t={trips.find((x) => x.id === sel.id) || sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} onUpdate={onUpdate} />;
-  const tt = totals(trips);
+  const tt = totals(trips), avgS = avgScore(trips);
   const lp = tt.left + tt.right ? (tt.left / (tt.left + tt.right)) * 100 : 50;
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
@@ -681,6 +920,7 @@ function Profile({ me, trips, terr, launches = [], onUpdate, onAvatar, onDelete 
       <Grid>
         <Card icon="stop-circle" color={C.dim} label="Toplam Durak" value={tt.stops} />
         <Card icon="swap-horizontal" color={C.dim} label="Ort. Trip Uzunluğu" value={(tt.n ? tt.dist / tt.n : 0).toFixed(1)} unit="km" />
+        <Card wide icon="ribbon" color={avgS == null ? C.dim : scoreInfo(avgS)[1]} label="Ort. Sürüş Puanı" value={avgS == null ? '—' : Math.round(avgS)} unit="/ 100" />
         <Card wide icon="map" color="#BF5AF2" label="Ele Geçirilen Bölge" value={terr} />
       </Grid>
             <LaunchSection runs={launches} />
@@ -2179,7 +2419,7 @@ const SET_CATS = [
   ['server', 'server-outline', 'Sunucu', 'Bağlantı testi'],
   ['update', 'cloud-download-outline', 'Güncelleme', 'Sürüm ve güncelleme kontrolü'],
 ];
-function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, onSignOut }) {
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, onSignOut, onDeleteAccount }) {
   const [cat, setCat] = useState(autoCheck ? 'update' : null);
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
@@ -2224,6 +2464,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
         <Box title="E-posta" sub="Giriş e-postan başkalarına gösterilmez."><Text style={[s.itemTitle, { marginTop: 10 }]}>{email || '—'}</Text></Box>
         <Box title="Kullanıcı adı"><Text style={[s.itemTitle, { marginTop: 10 }]}>{username}</Text></Box>
         <TouchableOpacity style={[s.btn, { backgroundColor: '#FF453A22' }]} onPress={onSignOut}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Çıkış yap</Text></TouchableOpacity>
+        <TouchableOpacity style={[s.btn, { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#FF453A66', marginTop: 10 }]} onPress={onDeleteAccount}><Text style={[s.btnText, { color: '#FF6B6B' }]}>Hesabı sil</Text></TouchableOpacity>
       </>
     ),
     look: (
@@ -2471,6 +2712,7 @@ function Detail({ t, onBack, onDelete, onUpdate }) {
       <SpeedDist route={t.route} />
       <TripStats t={t} />
       <TouchableOpacity style={s.btn} onPress={() => setSharing(true)}><Text style={s.btnText}>Sürüşü paylaş</Text></TouchableOpacity>
+      {t.route?.length > 1 && <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 10 }]} onPress={() => exportGpx(t)}><Text style={[s.btnText, { color: C.accent }]}>GPX olarak dışa aktar</Text></TouchableOpacity>}
       <TouchableOpacity style={[s.btn, { backgroundColor: C.card, marginTop: 10 }]} onPress={onDelete}>
         <Text style={[s.btnText, { color: '#FF6B6B' }]}>Sürüşü sil</Text>
       </TouchableOpacity>
@@ -2524,7 +2766,7 @@ function NewsSheet({ items, onClose }) {
 }
 function AppInner({ ready }) {
   const sysScheme = useColorScheme();
-  const [acct, setAcct] = useState('loading'), [link, setLink] = useState('wait');
+  const [acct, setAcct] = useState('loading'), [link, setLink] = useState('wait'), [got, setGot] = useState({});
   useEffect(() => {
     if (!online) { setAcct('in'); setLink('ok'); return; }
     restore().then((u) => setAcct(u ? 'in' : 'out')).catch(() => setAcct('out'));
@@ -2642,6 +2884,7 @@ function AppInner({ ready }) {
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
     const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: vidRef.current };
+    t.score = driveScore(t);
     const n = [t, ...trips];
     setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     setTab('profile');
@@ -2745,6 +2988,20 @@ function AppInner({ ready }) {
     })();
   }, [ready, profile && profile.thumb, profile && profile.avatar]);
   const cells = useMemo(() => [...new Set([...cellStore, ...cellsOf([route])])], [cellStore, route]);
+  const badges = useMemo(() => computeBadges({ trips, cells: cellStore, launches, regions }), [trips, cellStore, launches, regions]);
+  useEffect(() => {
+    if (!pReady || !ready || !profile) return;
+    AsyncStorage.getItem(BKEY).then((v) => {
+      const old = v ? JSON.parse(v) : null;
+      if (!old && trips.length === 0) return;
+      const now = { ...(old || {}) }, fresh = badges.filter((b) => b.done && !now[b.id]);
+      if (!fresh.length) { if (!old) AsyncStorage.setItem(BKEY, '{}').catch(() => {}); setGot(now); return; }
+      fresh.forEach((b) => { now[b.id] = Date.now(); });
+      AsyncStorage.setItem(BKEY, JSON.stringify(now)).catch(() => {});
+      setGot(now);
+      if (old) { setToast(`🏆 Yeni rozet: ${fresh[0].title}${fresh.length > 1 ? ` +${fresh.length - 1}` : ''}`); setTimeout(() => setToast(''), 2800); }
+    }).catch(() => {});
+  }, [badges, pReady, ready, !!profile]);
   const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
   useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
@@ -2810,6 +3067,18 @@ function AppInner({ ready }) {
   if (!profile.car) return shell(<Welcome existing={profile} onDone={saveProfile} />);
   const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
   const doSignOut = () => AlertX.alert('Çıkış yapılsın mı?', 'Sürüş kayıtların bu telefonda kalır. Tekrar giriş yapınca hesabına bağlanırsın.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkış yap', style: 'destructive', onPress: async () => { await signOut(); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out'); } }]);
+  const runDelete = async () => {
+    const fail = () => AlertX.alert('Hesap silinemedi', 'İnternetini kontrol edip tekrar dene. Sorun sürerse sunucuda hesap silme güncellemesi (SQL) eksik olabilir.');
+    try {
+      const r = await api('rpc/delete_account', { method: 'POST', body: '{}' });
+      const j = r.ok ? await r.json() : null;
+      if (j !== 'ok') return fail();
+    } catch { return fail(); }
+    await signOut();
+    AsyncStorage.removeItem(PKEY).catch(() => {}); AsyncStorage.removeItem(FKEY).catch(() => {});
+    setFriends([]); setProfile(null); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out');
+  };
+  const doDeleteAccount = () => AlertX.alert('Hesap silinsin mi?', 'Hesabın, sıralamadaki kaydın, hikayelerin, mesajların ve kulüp üyeliklerin sunucudan silinir. Kurucusu olduğun kulüplerde başka üye varsa kulüp onlara devredilir, yoksa silinir. Bu telefondaki sürüş kayıtların silinmez. Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Hesabı sil', style: 'destructive', onPress: () => AlertX.alert('Emin misin?', 'Hesabın kalıcı olarak silinecek.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Evet, sil', style: 'destructive', onPress: runDelete }]) }]);
   const selectVehicle = (id) => saveProfile(pickVehicle(profile, id));
   const addVehicle = (v) => saveProfile(withVehicle(profile, v));
   const editVehicle = (v) => saveProfile(updateVehicle(profile, activeV, v));
@@ -2860,7 +3129,7 @@ function AppInner({ ready }) {
           <View style={s.dBg}>
             <View style={s.dPanel}>
               <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
-              {[['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control']].map(([k, ic, l]) => (
+              {[['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
                 <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
               ))}
               <View style={{ flex: 1 }} />
@@ -2874,8 +3143,10 @@ function AppInner({ ready }) {
         </Modal>
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
+        {screen === 'achv' && <AchvScreen badges={badges} got={got} onClose={() => setScreen(null)} />}
+        {screen === 'care' && <CareScreen vehicle={profile.car} vid={activeV} driven={totals(vTrips).dist + (on ? live.dist : 0)} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
-        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onDeleteAccount={doDeleteAccount} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
         {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
