@@ -668,13 +668,13 @@ function MonthChart({ trips }) {
 }
 
 const METRICS = [['total_km', 'Toplam km', 'km'], ['top_speed', 'Top Speed', 'km/s'], ['avg_speed', 'Ort. Hız', 'km/s']];
-function Board({ me, friends, addFriend }) {
+function Board({ me, friends }) {
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [mi, setMi] = useState(0);
-  const [type, setType] = useState('month');
+  const [type, setType] = useState('km');
+  const [period, setPeriod] = useState('month');
   const [fr, setFr] = useState(false);
-  const [name, setName] = useState('');
   const load = async () => {
     if (!online) return;
     setBusy(true);
@@ -683,9 +683,13 @@ function Board({ me, friends, addFriend }) {
   };
   useEffect(() => { load(); }, []);
   if (!online) return <View style={{ flex: 1, padding: 20 }}><Text style={s.title}>Sıralama</Text><Text style={s.itemSub}>Sıralama sunucusu henüz bağlanmadı.</Text></View>;
-  const mk = type === 'month' ? 'month_km' : METRICS[mi][0], mu = mk.endsWith('km') ? 'km' : 'km/s', nk = monthKey(new Date()), car = me.car || {};
-  const list = rows.filter((r) => (type === 'month' ? r.month_key === nk : r.car_brand === car.brand && r.car_model === car.model) && (!fr || r.username === me.username || friends.includes(r.username))).sort((a, b) => (b[mk] || 0) - (a[mk] || 0));
-  const val = (r) => (mk.endsWith('km') ? (r.total_km || 0).toFixed(1) : Math.round(r[mk] || 0));
+  const nk = monthKey(new Date()), car = me.car || {};
+  const mk = type === 'car' && mi > 0 ? METRICS[mi][0] : period === 'month' ? 'month_km' : 'total_km';
+  const monthly = mk === 'month_km', mu = mk.endsWith('km') ? 'km' : 'km/s';
+  const list = rows.filter((r) => (type !== 'car' || (r.car_brand === car.brand && r.car_model === car.model)) && (!monthly || r.month_key === nk) && (!fr || r.username === me.username || friends.includes(r.username))).sort((a, b) => (b[mk] || 0) - (a[mk] || 0));
+  const val = (r) => (mu === 'km' ? (r[mk] || 0).toFixed(1) : Math.round(r[mk] || 0));
+  const cap = type === 'car' ? `${car.brand} ${car.model} kullananlar · ${monthly ? 'bu ay' : 'tüm zamanlar'}` : monthly ? "Bu ayın km sıralaması. Her ayın 1'inde sıfırlanır." : 'Tüm zamanların toplam km sıralaması';
+  const sub = (r) => [r.car_brand ? `${r.car_brand} ${r.car_model} ${r.car_year || ''}`.trim() : null, monthly ? null : `${r.trips} sürüş`].filter(Boolean).join(' · ');
   const Pod = ({ r, n, h }) => !r ? <View style={{ flex: 1 }} /> : (
     <View style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end' }}>
       {n === 1 && <Ionicons name="trophy" size={22} color="#FFD60A" />}
@@ -705,35 +709,30 @@ function Board({ me, friends, addFriend }) {
         <View>
           <Text style={s.title}>TripRank</Text>
           <View style={[s.seg, { position: 'relative', top: 0, alignSelf: 'flex-start', marginBottom: 14 }]}>
-            {[['month', 'Km'], ['car', 'Araç']].map(([k, l]) => (
+            {[['km', 'Km'], ['car', 'Araç']].map(([k, l]) => (
               <TouchableOpacity key={k} style={[s.segBtn, { paddingHorizontal: 20 }, type === k && s.segActive]} onPress={() => setType(k)}><Text style={[s.segText, type === k && { color: C.text }]}>{l}</Text></TouchableOpacity>
             ))}
           </View>
-          {type === 'month' && <Text style={[s.itemSub, { marginBottom: 12 }]}>Bu ayın toplam km sıralaması</Text>}
-          {type === 'car' && <Text style={[s.itemSub, { marginBottom: 12 }]}>{car.brand} {car.model} kullananlar</Text>}
-          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+          <Text style={[s.itemSub, { marginBottom: 12 }]}>{cap}</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
             <TouchableOpacity style={s.fpill} onPress={() => setFr(!fr)}><Ionicons name="people" size={16} color={C.text} /><Text style={s.navText}>{fr ? 'Arkadaşlar' : 'Herkes'}</Text></TouchableOpacity>
-            {type === 'car' && <TouchableOpacity style={s.fpill} onPress={() => setMi((mi + 1) % 3)}><Ionicons name="stats-chart" size={16} color={C.text} /><Text style={s.navText}>{METRICS[mi][1]}</Text></TouchableOpacity>}
+            <TouchableOpacity style={s.fpill} onPress={() => setPeriod(period === 'month' ? 'all' : 'month')}><Ionicons name="calendar" size={16} color={C.text} /><Text style={s.navText}>{period === 'month' ? 'Aylık' : 'Tümü'}</Text></TouchableOpacity>
+            {type === 'car' && <TouchableOpacity style={s.fpill} onPress={() => setMi((mi + 1) % 3)}><Ionicons name="stats-chart" size={16} color={C.text} /><Text style={s.navText}>{mi === 0 && monthly ? 'Aylık km' : METRICS[mi][1]}</Text></TouchableOpacity>}
           </View>
-          {fr && (
-            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
-              <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={name} onChangeText={setName} placeholder="arkadaş kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" />
-              <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={() => { if (name.trim()) { addFriend(name.trim().toLowerCase()); setName(''); } }}><Text style={[s.navText, { color: '#06101F' }]}>Ekle</Text></TouchableOpacity>
-            </View>
-          )}
+          {fr && friends.length === 0 && <Text style={[s.itemSub, { marginBottom: 12 }]}>Henüz arkadaşın yok. Soldaki menüden Arkadaşlar bölümüne gidip ekleyebilirsin.</Text>}
           <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, marginBottom: 16 }}>
             <Pod r={list[1]} n={2} h={64} /><Pod r={list[0]} n={1} h={92} /><Pod r={list[2]} n={3} h={48} />
           </View>
         </View>
       }
-      ListEmptyComponent={list.length ? null : <Text style={s.hint}>{type === 'car' ? 'Aynı aracı kullanan kimse yok.' : 'Bu ay henüz kimse sürmedi.'}</Text>}
+      ListEmptyComponent={list.length ? null : <Text style={s.hint}>{type === 'car' ? 'Aynı aracı kullanan kimse yok.' : monthly ? 'Bu ay henüz kimse sürmedi.' : 'Henüz kimse yok.'}</Text>}
       renderItem={({ item, index }) => (
         <View style={[s.item, { flexDirection: 'row', alignItems: 'center' }, item.username === me.username && { borderWidth: 1, borderColor: C.accent }]}>
           <Text style={s.rank}>{index + 4}</Text>
           <View style={[s.pAv, { width: 40, height: 40, borderRadius: 20, marginRight: 12 }]}><Text style={s.pLetter}>{item.username[0].toUpperCase()}</Text></View>
           <View style={{ flex: 1 }}>
             <Text style={s.itemTitle}>{item.username}</Text>
-            <Text style={s.itemSub}>{item.car_brand ? `${item.car_brand} ${item.car_model} ${item.car_year || ''} · ` : ''}{item.trips} sürüş</Text>
+            <Text style={s.itemSub}>{sub(item)}</Text>
           </View>
           <Text style={s.itemTitle}>{val(item)} <Text style={s.itemSub}>{mu}</Text></Text>
         </View>
@@ -2332,6 +2331,69 @@ function ClubView({ club: club0, me, onBack }) {
     </View>
   );
 }
+function FriendsScreen({ me, friends, addFriend, removeFriend, onClose }) {
+  const [name, setName] = useState(''), [busy, setBusy] = useState(false), [info, setInfo] = useState({});
+  useEffect(() => {
+    if (!online || !friends.length) return;
+    let live = true;
+    (async () => {
+      try {
+        const r = await api(`profiles?username=in.(${friends.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`);
+        const j = r.ok ? await r.json() : [];
+        if (live && Array.isArray(j)) setInfo(Object.fromEntries(j.map((x) => [x.username, x])));
+      } catch {}
+    })();
+    return () => { live = false; };
+  }, [friends.length]);
+  const add = async () => {
+    const u = name.trim().toLowerCase();
+    if (!u) return;
+    if (u === me.username) return AlertX.alert('Bu sensin', 'Kendini arkadaş olarak ekleyemezsin.');
+    if (friends.includes(u)) return AlertX.alert('Zaten ekli', `${u} arkadaş listende var.`);
+    setBusy(true);
+    let found = null;
+    try {
+      const r = await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username`);
+      const j = r.ok ? await r.json() : null;
+      found = Array.isArray(j) ? j.length > 0 : null;
+    } catch {}
+    setBusy(false);
+    if (found === null) return AlertX.alert('Bağlanılamadı', 'İnternetini kontrol edip tekrar dene.');
+    if (!found) return AlertX.alert('Kullanıcı bulunamadı', 'Kullanıcı adını kontrol et.');
+    addFriend(u); setName('');
+  };
+  const remove = (u) => AlertX.alert('Arkadaş silinsin mi?', u, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => removeFriend(u) }]);
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Arkadaşlar</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          {!online ? <Text style={s.itemSub}>Arkadaşlar için sunucu bağlantısı gerekli.</Text> : (
+            <>
+              <Text style={s.itemSub}>Kullanıcı adıyla arkadaş ekle. TripRank'te "Arkadaşlar" filtresi bu listeyi kullanır.</Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12, marginBottom: 14 }}>
+                <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={name} onChangeText={setName} placeholder="arkadaş kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} onSubmitEditing={add} returnKeyType="done" />
+                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={add} disabled={busy}>{busy ? <ActivityIndicator color="#06101F" /> : <Text style={[s.navText, { color: '#06101F' }]}>Ekle</Text>}</TouchableOpacity>
+              </View>
+              {friends.length === 0 && <Text style={s.hint}>Henüz arkadaşın yok.</Text>}
+              {friends.map((u) => {
+                const x = info[u], line = x ? [x.car_brand ? `${x.car_brand} ${x.car_model}` : null, `${(x.total_km || 0).toFixed(0)} km`].filter(Boolean).join(' · ') : '';
+                return (
+                  <View key={u} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+                    <View style={[s.pAv, { width: 40, height: 40, borderRadius: 20, marginVertical: 0 }]}><Text style={s.pLetter}>{u[0].toUpperCase()}</Text></View>
+                    <View style={{ flex: 1 }}><Text style={s.itemTitle}>{u}</Text>{!!line && <Text style={s.itemSub}>{line}</Text>}</View>
+                    <TouchableOpacity onPress={() => remove(u)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>
+                  </View>
+                );
+              })}
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function ClubsScreen({ me, onClose }) {
   const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState('');
   const load = async () => {
@@ -2988,6 +3050,7 @@ function AppInner({ ready }) {
     }).catch(() => {});
   }, [badges, pReady, ready, !!profile]);
   const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
+  const removeFriend = (u) => { const n = friends.filter((x) => x !== u); setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
   useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
   }, []);
@@ -3090,7 +3153,7 @@ function AppInner({ ready }) {
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
           {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
-          {tab === 'board' && <Board me={profile} friends={friends} addFriend={addFriend} />}
+          {tab === 'board' && <Board me={profile} friends={friends} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onEdit={editVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
           {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
@@ -3114,7 +3177,7 @@ function AppInner({ ready }) {
           <View style={s.dBg}>
             <View style={s.dPanel}>
               <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
-              {[['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
+              {[['friends', 'person-add', 'Arkadaşlar'], ['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
                 <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
               ))}
               <View style={{ flex: 1 }} />
@@ -3126,6 +3189,7 @@ function AppInner({ ready }) {
             <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenu(false)} />
           </View>
         </Modal>
+        {screen === 'friends' && <FriendsScreen me={profile} friends={friends} addFriend={addFriend} removeFriend={removeFriend} onClose={() => setScreen(null)} />}
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
         {screen === 'achv' && <AchvScreen badges={badges} got={got} onClose={() => setScreen(null)} />}
