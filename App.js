@@ -2501,7 +2501,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
   const ping = async () => {
     if (!online) return setSv('Sunucu adresi ayarlı değil (config.js boş).');
     setSv('Deneniyor...');
-    const res = await Promise.all(['profiles', 'clubs', 'club_members', 'club_posts', 'stories', 'presence'].map(async (n) => { try { return [n, (await api(`${n}?select=*&limit=1`)).status]; } catch { return [n, 0]; } }));
+    const res = await Promise.all(Object.entries({ profiles: 'username', clubs: 'id', club_members: 'club_id', club_posts: 'id', stories: 'id', presence: 'username' }).map(async ([n, c]) => { try { return [n, (await api(`${n}?select=${c}&limit=1`)).status]; } catch { return [n, 0]; } }));
     const bad = res.filter(([, c]) => c !== 200);
     setSv(bad.length ? 'Sorun var: ' + bad.map(([n, c]) => `${n} (${c || 'ulaşılamadı'})`).join(', ') + '. 404 = tablo yok, 401/403 = anahtar ya da izin, ulaşılamadı = adres yanlış.' : 'Sunucu hazır ✓ Tüm tablolara erişilebiliyor.');
   };
