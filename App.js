@@ -30,7 +30,7 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 const DARK = { bg: '#000000', card: '#1C1C21', line: '#2C2C34', text: '#FFFFFF', dim: '#9A9AA3', accent: '#6EC7C7', warn: '#FF9500', sel: '#2E4545' };
 const LIGHT = { bg: '#F2F2F7', card: '#FFFFFF', line: '#D8D8DE', text: '#111114', dim: '#6B6B75', accent: '#2A9D9D', warn: '#E68600', sel: '#CFE8E8' };
 let C = DARK, s = null, curTheme = '';
-const NKEY = '@apexdrive_news', LKEY = '@apexdrive_launch', SKEY = '@apexdrive_settings', CKEY = '@apexdrive_cells', VKEY = '@apexdrive_vehicle', FKEY = '@apexdrive_friends', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
+const NKEY = '@apexdrive_news', LKEY = '@apexdrive_launch', SKEY = '@apexdrive_settings', CKEY = '@apexdrive_cells', VKEY = '@apexdrive_vehicle', PKEY = '@apexdrive_profile', KEY = '@apexdrive_trips', RKEY = '@apexdrive_regions', TASK = 'apexdrive-bg', G = 9.81;
 
 const hav = (a, b) => {
   const R = 6371, r = Math.PI / 180;
@@ -2064,6 +2064,7 @@ function ClubMedia({ club, onClose }) {
   );
 }
 function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
+  const R = useRel();
   const [sel, setSel] = useState(null), [media, setMedia] = useState(false), [nm, setNm] = useState(club.name), [ab, setAb] = useState(club.about || '');
   const isOwner = club.owner === me.username, mine = mem.find((m) => m.username === me.username), isAdmin = !!mine && mine.role === 'admin', isM = !!mine || isOwner;
   const can = (m) => m.username !== me.username && m.username !== club.owner && (isOwner || (isAdmin && m.role !== 'admin'));
@@ -2134,6 +2135,7 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
                 <Text style={s.itemTitle}>{m.username}{m.username === club.owner ? '  👑' : m.role === 'admin' ? '  ★' : ''}</Text>
                 <Text style={s.itemSub}>{m.username === club.owner ? 'Kurucu' : m.role === 'admin' ? 'Yönetici' : m.car_brand ? `${m.car_brand} ${m.car_model}` : 'Üye'}</Text>
               </View>
+              {m.username !== me.username && !sel && <FriendBtn rel={R.rel(m.username)} onAdd={() => R.act('friend_request', { p_username: m.username })} onAccept={() => R.act('friend_respond', { p_username: m.username, p_accept: true })} />}
               {can(m) && !sel && <TouchableOpacity onPress={() => manage(m)} style={{ padding: 6 }}><Ionicons name="ellipsis-horizontal" size={22} color={C.text} /></TouchableOpacity>}
             </View>
           ))}
@@ -2331,38 +2333,55 @@ function ClubView({ club: club0, me, onBack }) {
     </View>
   );
 }
-function FriendsScreen({ me, friends, addFriend, removeFriend, onClose }) {
-  const [name, setName] = useState(''), [busy, setBusy] = useState(false), [info, setInfo] = useState({});
-  useEffect(() => {
-    if (!online || !friends.length) return;
-    let live = true;
-    (async () => {
-      try {
-        const r = await api(`profiles?username=in.(${friends.map(encodeURIComponent).join(',')})&select=username,total_km,car_brand,car_model`);
-        const j = r.ok ? await r.json() : [];
-        if (live && Array.isArray(j)) setInfo(Object.fromEntries(j.map((x) => [x.username, x])));
-      } catch {}
-    })();
-    return () => { live = false; };
-  }, [friends.length]);
-  const add = async () => {
-    const u = name.trim().toLowerCase();
-    if (!u) return;
-    if (u === me.username) return AlertX.alert('Bu sensin', 'Kendini arkadaş olarak ekleyemezsin.');
-    if (friends.includes(u)) return AlertX.alert('Zaten ekli', `${u} arkadaş listende var.`);
-    setBusy(true);
-    let found = null;
-    try {
-      const r = await api(`profiles?username=eq.${encodeURIComponent(u)}&select=username`);
-      const j = r.ok ? await r.json() : null;
-      found = Array.isArray(j) ? j.length > 0 : null;
-    } catch {}
-    setBusy(false);
-    if (found === null) return AlertX.alert('Bağlanılamadı', 'İnternetini kontrol edip tekrar dene.');
-    if (!found) return AlertX.alert('Kullanıcı bulunamadı', 'Kullanıcı adını kontrol et.');
-    addFriend(u); setName('');
+// ---- Karşılıklı arkadaşlık (istek + onay). Sunucudaki friend_* fonksiyonlarıyla çalışır ----
+const rpc = async (fn, args = {}) => {
+  try { const r = await api(`rpc/${fn}`, { method: 'POST', body: JSON.stringify(args) }); return r.ok ? await r.json() : null; } catch { return null; }
+};
+function useRel() {
+  const [list, setList] = useState(null);
+  const load = async () => { const j = await rpc('friend_list'); setList(Array.isArray(j) ? j : 'err'); };
+  useEffect(() => { load(); }, []);
+  const rel = (u) => (Array.isArray(list) ? (list.find((x) => x.uname === u) || {}).rel : undefined);
+  const act = async (fn, args) => {
+    const r = await rpc(fn, args);
+    if (typeof r !== 'string') AlertX.alert('İşlem yapılamadı', 'İnternetini kontrol et. Sorun sürerse sunucuda arkadaşlık güncellemesi (SQL) eksik olabilir.');
+    else if (r === 'limit') AlertX.alert('Çok fazla istek', 'Bekleyen istek sayın üst sınıra ulaştı. Birkaçı kabul edilince tekrar dene.');
+    else if (r === 'notfound') AlertX.alert('Kullanıcı bulunamadı', 'Bu kullanıcı artık yok.');
+    await load();
+    return r;
   };
-  const remove = (u) => AlertX.alert('Arkadaş silinsin mi?', u, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => removeFriend(u) }]);
+  return { list, rel, act };
+}
+function FriendBtn({ rel, onAdd, onAccept }) {
+  if (rel === 'friend') return <View style={s.fpill}><Ionicons name="checkmark-circle" size={16} color="#34C759" /><Text style={s.navText}>Arkadaş</Text></View>;
+  if (rel === 'outgoing') return <View style={s.fpill}><Ionicons name="time" size={16} color={C.dim} /><Text style={[s.navText, { color: C.dim }]}>Gönderildi</Text></View>;
+  if (rel === 'incoming') return <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={onAccept}><Text style={[s.navText, { color: '#06101F' }]}>Kabul et</Text></TouchableOpacity>;
+  return <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={onAdd}><Ionicons name="person-add" size={16} color="#06101F" /><Text style={[s.navText, { color: '#06101F' }]}>Ekle</Text></TouchableOpacity>;
+}
+const PersonRow = ({ name, line, right }) => (
+  <View style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+    <View style={[s.pAv, { width: 40, height: 40, borderRadius: 20, marginVertical: 0 }]}><Text style={s.pLetter}>{name[0].toUpperCase()}</Text></View>
+    <View style={{ flex: 1 }}><Text style={s.itemTitle}>{name}</Text>{!!line && <Text style={s.itemSub}>{line}</Text>}</View>
+    {right}
+  </View>
+);
+const lineOf = (x) => [x.car_brand ? `${x.car_brand} ${x.car_model}` : null, x.total_km != null ? `${Math.round(x.total_km)} km` : null].filter(Boolean).join(' · ');
+function FriendsScreen({ me, onClose, onChanged }) {
+  const R = useRel(), [q, setQ] = useState(''), [res, setRes] = useState(null), [busy, setBusy] = useState(false);
+  const run = async (fn, args) => { await R.act(fn, args); onChanged && onChanged(); };
+  const search = async () => {
+    const k = q.trim().toLowerCase().replace(/[^a-z0-9_.]/g, '');
+    if (k.length < 2) return AlertX.alert('En az 2 harf yaz', 'Aramak için kullanıcı adının bir kısmını yaz.');
+    setBusy(true);
+    try {
+      const r = await api(`profiles?username=ilike.*${k}*&select=username,car_brand,car_model,total_km&limit=20`);
+      const j = r.ok ? await r.json() : null;
+      setRes(Array.isArray(j) ? j.filter((x) => x.username !== me.username) : 'err');
+    } catch { setRes('err'); }
+    setBusy(false);
+  };
+  const remove = (u) => AlertX.alert('Arkadaşlıktan çıkarılsın mı?', u, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkar', style: 'destructive', onPress: () => run('friend_remove', { p_username: u }) }]);
+  const L = Array.isArray(R.list) ? R.list : [], by = (k) => L.filter((x) => x.rel === k);
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.root}>
@@ -2370,22 +2389,30 @@ function FriendsScreen({ me, friends, addFriend, removeFriend, onClose }) {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Arkadaşlar</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
           {!online ? <Text style={s.itemSub}>Arkadaşlar için sunucu bağlantısı gerekli.</Text> : (
             <>
-              <Text style={s.itemSub}>Kullanıcı adıyla arkadaş ekle. TripRank'te "Arkadaşlar" filtresi bu listeyi kullanır.</Text>
-              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12, marginBottom: 14 }}>
-                <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={name} onChangeText={setName} placeholder="arkadaş kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} onSubmitEditing={add} returnKeyType="done" />
-                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={add} disabled={busy}>{busy ? <ActivityIndicator color="#06101F" /> : <Text style={[s.navText, { color: '#06101F' }]}>Ekle</Text>}</TouchableOpacity>
+              <Text style={s.itemSub}>Kullanıcı adıyla ara ve istek gönder. Karşı taraf kabul edince arkadaş olursunuz.</Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12, marginBottom: 6 }}>
+                <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={q} onChangeText={setQ} placeholder="kullanıcı adı ara" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} onSubmitEditing={search} returnKeyType="search" />
+                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={search} disabled={busy}>{busy ? <ActivityIndicator color="#06101F" /> : <Ionicons name="search" size={18} color="#06101F" />}</TouchableOpacity>
               </View>
-              {friends.length === 0 && <Text style={s.hint}>Henüz arkadaşın yok.</Text>}
-              {friends.map((u) => {
-                const x = info[u], line = x ? [x.car_brand ? `${x.car_brand} ${x.car_model}` : null, `${(x.total_km || 0).toFixed(0)} km`].filter(Boolean).join(' · ') : '';
-                return (
-                  <View key={u} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
-                    <View style={[s.pAv, { width: 40, height: 40, borderRadius: 20, marginVertical: 0 }]}><Text style={s.pLetter}>{u[0].toUpperCase()}</Text></View>
-                    <View style={{ flex: 1 }}><Text style={s.itemTitle}>{u}</Text>{!!line && <Text style={s.itemSub}>{line}</Text>}</View>
-                    <TouchableOpacity onPress={() => remove(u)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>
+              {res === 'err' && <Text style={s.hint}>Arama yapılamadı. İnternetini kontrol et.</Text>}
+              {Array.isArray(res) && res.length === 0 && <Text style={s.hint}>Kullanıcı bulunamadı.</Text>}
+              {Array.isArray(res) && res.length > 0 && <Text style={s.sec}>Sonuçlar</Text>}
+              {Array.isArray(res) && res.map((x) => <PersonRow key={x.username} name={x.username} line={lineOf(x)} right={<FriendBtn rel={R.rel(x.username)} onAdd={() => run('friend_request', { p_username: x.username })} onAccept={() => run('friend_respond', { p_username: x.username, p_accept: true })} />} />)}
+              {R.list === 'err' && <Text style={s.hint}>Liste yüklenemedi. Sunucuda arkadaşlık güncellemesi (SQL) eksik olabilir.</Text>}
+              {by('incoming').length > 0 && <Text style={s.sec}>İstekler ({by('incoming').length})</Text>}
+              {by('incoming').map((x) => (
+                <PersonRow key={x.uname} name={x.uname} line={lineOf(x)} right={
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={() => run('friend_respond', { p_username: x.uname, p_accept: true })}><Text style={[s.navText, { color: '#06101F' }]}>Kabul</Text></TouchableOpacity>
+                    <TouchableOpacity style={s.fpill} onPress={() => run('friend_respond', { p_username: x.uname, p_accept: false })}><Ionicons name="close" size={16} color={C.text} /></TouchableOpacity>
                   </View>
-                );
-              })}
+                } />
+              ))}
+              {by('outgoing').length > 0 && <Text style={s.sec}>Gönderilen istekler</Text>}
+              {by('outgoing').map((x) => <PersonRow key={x.uname} name={x.uname} line={lineOf(x)} right={<TouchableOpacity style={s.fpill} onPress={() => run('friend_remove', { p_username: x.uname })}><Text style={s.navText}>İptal</Text></TouchableOpacity>} />)}
+              <Text style={s.sec}>Arkadaşlarım ({by('friend').length})</Text>
+              {Array.isArray(R.list) && by('friend').length === 0 && <Text style={s.hint}>Henüz arkadaşın yok.</Text>}
+              {by('friend').map((x) => <PersonRow key={x.uname} name={x.uname} line={lineOf(x)} right={<TouchableOpacity onPress={() => remove(x.uname)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>} />)}
             </>
           )}
         </ScrollView>
@@ -2830,7 +2857,7 @@ function AppInner({ ready }) {
   const [news, setNews] = useState(null), [launches, setLaunches] = useState([]), [toast, setToast] = useState(''), lastBack = useRef(0), tabRef = useRef('drive');
   const [tab, setTab] = useState('drive');
   const [profile, setProfile] = useState(undefined);
-  const [friends, setFriends] = useState([]);
+  const [social, setSocial] = useState({ friends: [], incoming: 0 });
   const [shareTrip, setShareTrip] = useState(null);
   const [docsBy, setDocsBy] = useState({});
   const [rem, setRem] = useState({ start: 30, freq: 1, hour: 9 });
@@ -2847,7 +2874,6 @@ function AppInner({ ready }) {
 
   useEffect(() => {
     AsyncStorage.getItem(KEY).then((v) => v && setTrips(JSON.parse(v))).catch(() => {});
-    AsyncStorage.getItem(FKEY).then((v) => v && setFriends(JSON.parse(v))).catch(() => {});
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
     AsyncStorage.getItem(RKEY).then((v) => { if (v) { regionsRef.current = JSON.parse(v); setRegions(regionsRef.current); } }).catch(() => {});
     Location.requestForegroundPermissionsAsync().catch(() => {});
@@ -3049,8 +3075,11 @@ function AppInner({ ready }) {
       if (old) { setToast(`🏆 Yeni rozet: ${fresh[0].title}${fresh.length > 1 ? ` +${fresh.length - 1}` : ''}`); setTimeout(() => setToast(''), 2800); }
     }).catch(() => {});
   }, [badges, pReady, ready, !!profile]);
-  const addFriend = (u) => { const n = [...new Set([...friends, u])]; setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
-  const removeFriend = (u) => { const n = friends.filter((x) => x !== u); setFriends(n); AsyncStorage.setItem(FKEY, JSON.stringify(n)).catch(() => {}); };
+  const loadSocial = async () => {
+    const j = await rpc('friend_list');
+    if (Array.isArray(j)) setSocial({ friends: j.filter((x) => x.rel === 'friend').map((x) => x.uname), incoming: j.filter((x) => x.rel === 'incoming').length });
+  };
+  useEffect(() => { if (online && acct === 'in' && link === 'ok' && profile && profile.linked) loadSocial(); }, [acct, link, !!profile]);
   useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
   }, []);
@@ -3123,8 +3152,8 @@ function AppInner({ ready }) {
       if (j !== 'ok') return fail();
     } catch { return fail(); }
     await signOut();
-    AsyncStorage.removeItem(PKEY).catch(() => {}); AsyncStorage.removeItem(FKEY).catch(() => {});
-    setFriends([]); setProfile(null); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out');
+    AsyncStorage.removeItem(PKEY).catch(() => {});
+    setSocial({ friends: [], incoming: 0 }); setProfile(null); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out');
   };
   const doDeleteAccount = () => AlertX.alert('Hesap silinsin mi?', 'Hesabın, sıralamadaki kaydın, hikayelerin, mesajların ve kulüp üyeliklerin sunucudan silinir. Kurucusu olduğun kulüplerde başka üye varsa kulüp onlara devredilir, yoksa silinir. Bu telefondaki sürüş kayıtların silinmez. Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Hesabı sil', style: 'destructive', onPress: () => AlertX.alert('Emin misin?', 'Hesabın kalıcı olarak silinecek.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Evet, sil', style: 'destructive', onPress: runDelete }]) }]);
   const selectVehicle = (id) => saveProfile(pickVehicle(profile, id));
@@ -3147,13 +3176,13 @@ function AppInner({ ready }) {
       <SafeAreaView style={s.root}>
         <StatusBar style={C === LIGHT ? 'dark' : 'light'} />
         <View style={s.hdr}>
-          <TouchableOpacity onPress={() => setMenu(true)} style={{ padding: 6 }}><Ionicons name="menu" size={28} color={C.text} /></TouchableOpacity>
+          <TouchableOpacity onPress={() => { setMenu(true); loadSocial(); }} style={{ padding: 6 }}><Ionicons name="menu" size={28} color={C.text} /></TouchableOpacity>
           <Text style={s.hdrT}>ApexDrive</Text>
         </View>
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
           {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
-          {tab === 'board' && <Board me={profile} friends={friends} />}
+          {tab === 'board' && <Board me={profile} friends={social.friends} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onEdit={editVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
           {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
         </View>
@@ -3178,7 +3207,7 @@ function AppInner({ ready }) {
             <View style={s.dPanel}>
               <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
               {[['friends', 'person-add', 'Arkadaşlar'], ['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
-                <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text></TouchableOpacity>
+                <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text>{k === 'friends' && social.incoming > 0 && <View style={{ backgroundColor: '#FF453A', borderRadius: 11, minWidth: 22, height: 22, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 }}><Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>{social.incoming}</Text></View>}</TouchableOpacity>
               ))}
               <View style={{ flex: 1 }} />
               <View style={{ height: 1, backgroundColor: C.line, marginBottom: 6 }} />
@@ -3189,7 +3218,7 @@ function AppInner({ ready }) {
             <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenu(false)} />
           </View>
         </Modal>
-        {screen === 'friends' && <FriendsScreen me={profile} friends={friends} addFriend={addFriend} removeFriend={removeFriend} onClose={() => setScreen(null)} />}
+        {screen === 'friends' && <FriendsScreen me={profile} onClose={() => setScreen(null)} onChanged={loadSocial} />}
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
         {screen === 'achv' && <AchvScreen badges={badges} got={got} onClose={() => setScreen(null)} />}
