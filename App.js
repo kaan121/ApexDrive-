@@ -1314,7 +1314,7 @@ async function scheduleDaily(prefs, trips) {
 async function scheduleReminders(by, rem, vehicles) {
   try {
     const all = await Notifications.getAllScheduledNotificationsAsync();
-    await Promise.all(all.filter((n) => !String(n.identifier).startsWith('gas-')).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
+    await Promise.all(all.filter((n) => !/^(gas|ev)-/.test(String(n.identifier))).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
     const vs = vehicles || [], list = Object.entries(by || {}).filter(([vid, d]) => d && (!vs.length || vs.some((x) => x.id === vid)) && DOCS.some(([k]) => parseDate(d[k])));
     if (!list.length) return;
     const perm = await Notifications.requestPermissionsAsync();
@@ -2174,10 +2174,126 @@ function useKbd() {
   }, []);
   return h;
 }
+// ---- Kulüp buluşmaları (etkinlik + katılım) ----
+const fmtEv = (iso) => new Date(iso).toLocaleString('tr-TR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+const hm = (iso) => { const d = new Date(iso); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const fmtHM = (v) => { const x = v.replace(/\D/g, '').slice(0, 4); return x.length > 2 ? `${x.slice(0, 2)}:${x.slice(2)}` : x; };
+// "Katılıyorum" dediğin yaklaşan buluşmalar için 1 saat önce hatırlatma kurar; silinen ya da değişenleri temizler
+async function syncEventReminders(club, events, rsvps, me) {
+  try {
+    const pre = `ev-${club.id}-`, want = new Map();
+    events.forEach((e) => {
+      const mine = rsvps.find((r) => r.event_id === e.id && r.username === me.username), at = new Date(e.starts_at).getTime() - 3600000;
+      if (mine && mine.going && at > Date.now()) want.set(pre + e.id, { e, at });
+    });
+    const all = await Notifications.getAllScheduledNotificationsAsync();
+    await Promise.all(all.filter((n) => String(n.identifier).startsWith(pre) && !want.has(n.identifier)).map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
+    if (!want.size) return;
+    const perm = await Notifications.requestPermissionsAsync();
+    if (!perm.granted) return;
+    if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('default', { name: 'Hatırlatmalar', importance: Notifications.AndroidImportance.HIGH });
+    for (const [id, { e, at }] of want) {
+      await Notifications.scheduleNotificationAsync({ identifier: id, content: { title: 'Kulüp buluşması', body: `${e.title} · ${club.name} · 1 saat sonra` }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: new Date(at) } });
+    }
+  } catch {}
+}
+function EventForm({ init, onSave, onClose }) {
+  const kb = useKbd(), [f, setF] = useState(init);
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const submit = () => {
+    const title = f.title.trim(), d = parseDate(f.date), m = /^(\d{2}):(\d{2})$/.exec(f.time || '');
+    if (!title) return AlertX.alert('Eksik bilgi', 'Etkinliğin adını yaz.');
+    if (!d) return AlertX.alert('Geçersiz tarih', 'Tarihi GG.AA.YYYY olarak yaz.');
+    if (!m || +m[1] > 23 || +m[2] > 59) return AlertX.alert('Geçersiz saat', 'Saati SS:DD olarak yaz (örn. 14:30).');
+    d.setHours(+m[1], +m[2], 0, 0);
+    if (d.getTime() < Date.now()) return AlertX.alert('Geçmiş zaman', 'Gelecekte bir tarih ve saat seç.');
+    onSave({ title, place: f.place.trim() || null, note: f.note.trim() || null, starts_at: d.toISOString() });
+  };
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end', paddingBottom: kb }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, maxHeight: '90%' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>{init.id ? 'Etkinliği düzenle' : 'Etkinlik ekle'}</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <ScrollView keyboardShouldPersistTaps="handled">
+            <TextInput style={[s.input, { marginTop: 4 }]} value={f.title} onChangeText={(v) => set('title', v)} placeholder="Etkinlik adı (örn. Pazar sabah turu)" placeholderTextColor={C.dim} maxLength={80} />
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TextInput style={[s.input, { flex: 1, marginTop: 10 }]} value={f.date} onChangeText={(v) => set('date', fmtD(v))} placeholder="Tarih GG.AA.YYYY" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={10} />
+              <TextInput style={[s.input, { flex: 1, marginTop: 10 }]} value={f.time} onChangeText={(v) => set('time', fmtHM(v))} placeholder="Saat SS:DD" placeholderTextColor={C.dim} keyboardType="number-pad" maxLength={5} />
+            </View>
+            <TextInput style={[s.input, { marginTop: 10 }]} value={f.place} onChangeText={(v) => set('place', v)} placeholder="Buluşma yeri (isteğe bağlı)" placeholderTextColor={C.dim} maxLength={120} />
+            <TextInput style={[s.input, { marginTop: 10 }]} value={f.note} onChangeText={(v) => set('note', v)} placeholder="Not (isteğe bağlı)" placeholderTextColor={C.dim} maxLength={500} multiline />
+            <TouchableOpacity style={s.btn} onPress={submit}><Text style={s.btnText}>Kaydet</Text></TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+function EventsSheet({ club, me, staff, evs, reload, onClose }) {
+  const [form, setForm] = useState(null);
+  useEffect(() => { reload(); }, []);
+  const mineOf = (id) => { const r = evs.rs.find((x) => x.event_id === id && x.username === me.username); return r ? r.going : null; };
+  const goingOf = (id) => evs.rs.filter((x) => x.event_id === id && x.going).map((x) => x.username);
+  const rsvp = async (e, g) => {
+    try {
+      const r = mineOf(e.id) === g
+        ? await api(`club_event_rsvps?event_id=eq.${e.id}&username=eq.${encodeURIComponent(me.username)}`, { method: 'DELETE' })
+        : await api('club_event_rsvps?on_conflict=event_id,username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ event_id: e.id, username: me.username, going: g }) });
+      if (!r.ok) throw 0;
+    } catch { AlertX.alert('İşlem yapılamadı', 'İnternetini kontrol edip tekrar dene.'); }
+    reload();
+  };
+  const save = async (v, id) => {
+    try {
+      const r = id
+        ? await api(`club_events?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(v) })
+        : await api('club_events', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ ...v, club_id: club.id, created_by: me.username }) });
+      if (!r.ok) throw 0;
+      setForm(null); reload();
+    } catch { AlertX.alert('Kaydedilemedi', 'İnternetini kontrol et. Sorun sürerse sunucuda etkinlik güncellemesi (SQL) eksik olabilir.'); }
+  };
+  const del = (e) => AlertX.alert('Etkinlik silinsin mi?', e.title, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: async () => { try { await api(`club_events?id=eq.${e.id}`, { method: 'DELETE' }); } catch {} reload(); } }]);
+  const evCard = (e, past) => {
+    const mine = mineOf(e.id), ppl = goingOf(e.id);
+    return (
+      <View key={e.id} style={[s.item, past && { opacity: 0.6 }]}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.itemTitle}>{e.title}</Text>
+            <Text style={[s.itemSub, { color: C.accent, fontWeight: '700' }]}>{fmtEv(e.starts_at)}</Text>
+            {!!e.place && <Text style={s.itemSub}>📍 {e.place}</Text>}
+          </View>
+          {staff && !past && <TouchableOpacity onPress={() => setForm({ id: e.id, title: e.title, date: fmtOut(new Date(e.starts_at)), time: hm(e.starts_at), place: e.place || '', note: e.note || '' })} style={{ padding: 6 }}><Ionicons name="create-outline" size={20} color={C.dim} /></TouchableOpacity>}
+          {staff && <TouchableOpacity onPress={() => del(e)} style={{ padding: 6 }}><Ionicons name="trash-outline" size={20} color={C.dim} /></TouchableOpacity>}
+        </View>
+        {!!e.note && <Text style={[s.itemSub, { color: C.text, marginTop: 6 }]}>{e.note}</Text>}
+        <Text style={[s.itemSub, { marginTop: 8 }]}>{ppl.length} kişi katılıyor{ppl.length ? `: ${ppl.slice(0, 5).join(', ')}${ppl.length > 5 ? ` +${ppl.length - 5}` : ''}` : ''}</Text>
+        {!past && <Chips opts={[['Katılıyorum', true], ['Katılmıyorum', false]]} val={mine} onPick={(g) => rsvp(e, g)} />}
+      </View>
+    );
+  };
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={s.title}>Etkinlikler</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <Text style={s.itemSub}>{club.name}</Text>
+          {staff && <TouchableOpacity style={[s.btn, { marginTop: 14 }]} onPress={() => setForm({ id: null, title: '', date: '', time: '', place: '', note: '' })}><Text style={s.btnText}>Etkinlik ekle</Text></TouchableOpacity>}
+          {evs.err && <Text style={s.hint}>Etkinlikler yüklenemedi. Sunucuda etkinlik güncellemesi (SQL) eksik olabilir.</Text>}
+          {!evs.err && evs.up.length === 0 && <Text style={s.hint}>Yaklaşan etkinlik yok.{staff ? '' : ' Etkinlikleri kulüp yöneticileri ekler.'}</Text>}
+          <View style={{ marginTop: 14 }}>{evs.up.map((e) => evCard(e, false))}</View>
+          {evs.past.length > 0 && <Text style={s.sec}>Geçmiş</Text>}
+          {evs.past.map((e) => evCard(e, true))}
+        </ScrollView>
+        {form && <EventForm init={form} onSave={(v) => save(v, form.id)} onClose={() => setForm(null)} />}
+      </SafeAreaView>
+    </Modal>
+  );
+}
 function ClubView({ club: club0, me, onBack }) {
   const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [pin, setPin] = useState(null), [txt, setTxt] = useState(''), [edit, setEdit] = useState(null);
   const [stk, setStk] = useState(false), [att, setAtt] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null), [hl, setHl] = useState(null), [limit, setLimit] = useState(60), [jump, setJump] = useState(null);
-  const listRef = useRef(null), kb = useKbd();
+  const listRef = useRef(null), kb = useKbd(), [evs, setEvs] = useState({ up: [], past: [], rs: [], err: false }), [evOpen, setEvOpen] = useState(false);
   const staff = club.owner === me.username || mem.some((m) => m.username === me.username && m.role === 'admin');
   const isM = mem.some((m) => m.username === me.username) || club.owner === me.username;
   const load = async () => {
@@ -2199,6 +2315,20 @@ function ClubView({ club: club0, me, onBack }) {
     } catch {}
   };
   useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [limit]);
+  const loadEvents = async () => {
+    try {
+      const cut = encodeURIComponent(new Date(Date.now() - 3 * 3600e3).toISOString()), base = `club_events?club_id=eq.${club.id}&select=id,title,place,note,starts_at,created_by`;
+      const [u, p] = await Promise.all([api(`${base}&starts_at=gte.${cut}&order=starts_at.asc&limit=30`), api(`${base}&starts_at=lt.${cut}&order=starts_at.desc&limit=5`)]);
+      const up = u.ok ? await u.json() : null, past = p.ok ? await p.json() : null;
+      if (!Array.isArray(up) || !Array.isArray(past)) return setEvs((x) => ({ ...x, err: true }));
+      const ids = [...up, ...past].map((e) => e.id);
+      let rs = [];
+      if (ids.length) { const r = await api(`club_event_rsvps?event_id=in.(${ids.join(',')})&select=event_id,username,going`); const j = r.ok ? await r.json() : []; rs = Array.isArray(j) ? j : []; }
+      setEvs({ up, past, rs, err: false });
+      syncEventReminders(club, up, rs, me);
+    } catch { setEvs((x) => ({ ...x, err: true })); }
+  };
+  useEffect(() => { if (isM) loadEvents(); }, [isM]);
   const goTo = (id) => {
     const i = posts.findIndex((x) => x.id === id);
     if (i < 0) { setJump(id); setLimit(400); return; }
@@ -2287,8 +2417,16 @@ function ClubView({ club: club0, me, onBack }) {
           <Av club={club} size={40} />
           <View style={{ flex: 1 }}><Text style={s.itemTitle} numberOfLines={1}>{club.name}</Text><Text style={s.itemSub}>{mem.length} üye</Text></View>
         </TouchableOpacity>
+        {isM && <TouchableOpacity onPress={() => setEvOpen(true)} style={{ padding: 6 }}><Ionicons name="calendar-outline" size={24} color={C.text} /></TouchableOpacity>}
         <TouchableOpacity onPress={() => setSet(true)} style={{ padding: 6 }}><Ionicons name="settings-outline" size={24} color={C.text} /></TouchableOpacity>
       </View>
+      {isM && evs.up[0] && (
+        <TouchableOpacity style={s.pinBar} onPress={() => setEvOpen(true)}>
+          <Ionicons name="calendar" size={18} color={C.accent} />
+          <View style={{ flex: 1 }}><Text style={[s.itemSub, { color: C.accent }]}>Sıradaki buluşma · {fmtEv(evs.up[0].starts_at)}</Text><Text style={s.itemTitle} numberOfLines={1}>{evs.up[0].title}</Text></View>
+          <Ionicons name="chevron-forward" size={18} color={C.dim} />
+        </TouchableOpacity>
+      )}
       {pin && <PinBar pin={pin} onGo={() => goTo(pin.id)} onClose={() => togglePin(pin)} />}
       {!isM && <TouchableOpacity style={[s.btn, { margin: 14 }]} onPress={join}><Text style={s.btnText}>Kulübe katıl</Text></TouchableOpacity>}
       <FlatList ref={listRef} inverted data={posts} extraData={hl} keyExtractor={(p) => String(p.id)} contentContainerStyle={{ padding: 14 }}
@@ -2329,6 +2467,7 @@ function ClubView({ club: club0, me, onBack }) {
       )}
       {stk && <StickerSheet onClose={() => setStk(false)} onPick={(r) => { setStk(false); send(r); }} />}
       {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
+      {evOpen && <EventsSheet club={club} me={me} staff={staff} evs={evs} reload={loadEvents} onClose={() => setEvOpen(false)} />}
       {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
     </View>
   );
