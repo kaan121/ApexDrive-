@@ -189,8 +189,9 @@ const monthKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}`;
 const syncProfile = (p, trips) => {
   if (!online) return;
   const tt = totals(tripsOf(trips, p.vid)), mk = monthKey(new Date()), car = p.car || {};
-  const mkm = trips.filter((t) => monthKey(new Date(t.start)) === mk).reduce((a, t) => a + t.dist, 0);
+  const mtrips = trips.filter((t) => monthKey(new Date(t.start)) === mk), mkm = mtrips.reduce((a, t) => a + t.dist, 0), r1 = (x) => (x == null ? null : Math.round(x * 10) / 10);
   api(`profiles?username=eq.${encodeURIComponent(p.username)}`, { method: 'PATCH', body: JSON.stringify({ total_km: tt.dist, top_speed: tt.top, trips: tt.n, avg_speed: tt.time > tt.still ? tt.dist / ((tt.time - tt.still) / 3600) : 0, month_km: mkm, month_key: mk, car_brand: car.brand, car_model: car.model, car_year: car.year, vehicle_type: car.vtype }) }).catch(() => {});
+  api(`profiles?username=eq.${encodeURIComponent(p.username)}`, { method: 'PATCH', body: JSON.stringify({ avg_score: r1(avgScore(tripsOf(trips, p.vid))), month_score: r1(avgScore(mtrips)) }) }).catch(() => {});
 };
 
 // ---- Bileşenler ----
@@ -333,6 +334,64 @@ function computeBadges({ trips, cells, launches, regions }) {
     ['launch', 'timer', 'Çıkış Hazır', 'Launch Control ile ilk ölçümünü yap', nl, 1],
   ].map(([id, icon, title, desc, cur, goal]) => ({ id, icon, title, desc, cur: Math.min(cur, goal), goal, done: cur >= goal }));
 }
+// ---- Aylık sürüş özeti (paylaşılabilir kart) ----
+const monthStats = (trips, y, m) => {
+  const ts = trips.filter((t) => { const d = new Date(t.start); return d.getFullYear() === y && d.getMonth() === m; });
+  if (!ts.length) return null;
+  return { n: ts.length, dist: ts.reduce((a, t) => a + t.dist, 0), time: ts.reduce((a, t) => a + t.duration, 0), longest: ts.reduce((a, t) => Math.max(a, t.dist), 0), days: new Set(ts.map((t) => dayIdx(t.start))).size, score: avgScore(ts) };
+};
+const MCell = ({ l, v }) => (
+  <View style={{ width: '50%', alignItems: 'center', marginVertical: 8 }}>
+    <Text style={{ color: '#FFFFFFAA', fontSize: 13 }}>{l}</Text>
+    <Text style={{ color: '#fff', fontSize: 24, fontWeight: '800' }}>{v}</Text>
+  </View>
+);
+function MonthlyScreen({ trips, name, car, onClose }) {
+  const W = Dimensions.get('window').width - 40, now = new Date(), shot = useRef(null);
+  const ym = (ts) => { const d = new Date(ts); return d.getFullYear() * 12 + d.getMonth(); };
+  const keys = [...new Set([ym(now), ...trips.map((t) => ym(t.start))])].sort((a, b) => b - a).slice(0, 6);
+  const [sel, setSel] = useState(keys[0]), [bg, setBg] = useState(0);
+  const y = Math.floor(sel / 12), m = sel % 12, st = monthStats(trips, y, m), info = st && st.score != null ? scoreInfo(st.score) : null;
+  const title = new Date(y, m, 1).toLocaleString('tr-TR', { month: 'long', year: 'numeric' });
+  const share = async () => {
+    try { const uri = await captureRef(shot, { format: 'png', quality: 1 }); await Sharing.shareAsync(uri, { mimeType: 'image/png' }); }
+    catch { AlertX.alert('Paylaşılamadı', 'Görsel oluşturulamadı, tekrar dene.'); }
+  };
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={s.root}>
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40, alignItems: 'center' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}><Text style={s.title}>Aylık Özet</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
+          <View style={{ alignSelf: 'flex-start', marginBottom: 14 }}><Chips opts={keys.map((k) => [new Date(Math.floor(k / 12), k % 12, 1).toLocaleString('tr-TR', { month: 'short', year: '2-digit' }), k])} val={sel} onPick={setSel} /></View>
+          <View ref={shot} collapsable={false} style={{ width: W, height: W * 1.25, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg], padding: 24, justifyContent: 'space-between' }}>
+            <View>
+              <Text style={{ color: '#FFFFFFAA', fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>APEXDRIVE · AYLIK ÖZET</Text>
+              <Text style={{ color: '#fff', fontSize: 26, fontWeight: '800', fontStyle: 'italic', marginTop: 4, textTransform: 'capitalize' }}>{title}</Text>
+            </View>
+            {st ? (
+              <View style={{ alignItems: 'center' }}>
+                <Text style={{ color: '#fff', fontSize: 72, fontWeight: '800', fontVariant: ['tabular-nums'] }}>{st.dist < 100 ? st.dist.toFixed(1) : Math.round(st.dist)}</Text>
+                <Text style={{ color: '#FFFFFFAA', fontSize: 16, marginTop: -6 }}>km</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: '100%', marginTop: 14 }}>
+                  <MCell l="Sürüş" v={st.n} /><MCell l="Süre" v={fmtDur(st.time)} /><MCell l="En uzun" v={`${st.longest.toFixed(0)} km`} /><MCell l="Sürülen gün" v={st.days} />
+                </View>
+              </View>
+            ) : <Text style={{ color: '#FFFFFFAA', fontSize: 18, textAlign: 'center' }}>Bu ay sürüş yok</Text>}
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View><Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>{name}</Text>{!!car && <Text style={{ color: '#FFFFFFAA', fontSize: 13 }}>{car.brand} {car.model}</Text>}</View>
+              {info && <View style={{ borderWidth: 2, borderColor: info[1], borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6, alignItems: 'center' }}><Text style={{ color: info[1], fontWeight: '800', fontSize: 20 }}>{Math.round(st.score)}</Text><Text style={{ color: info[1], fontSize: 11 }}>{info[0]}</Text></View>}
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', gap: 12, alignSelf: 'flex-start', marginTop: 14 }}>
+            {THEMES.map((c, i) => <TouchableOpacity key={c} onPress={() => setBg(i)} style={[s.dot, { backgroundColor: c, borderColor: bg === i ? C.accent : C.line }]} />)}
+          </View>
+          <TouchableOpacity style={[s.btn, !st && { opacity: 0.4 }]} onPress={share} disabled={!st}><Text style={s.btnText}>Paylaş</Text></TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function AchvScreen({ badges, got, onClose }) {
   const n = badges.filter((b) => got[b.id] || b.done).length;
   return (
@@ -678,18 +737,25 @@ function Board({ me, friends }) {
   const load = async () => {
     if (!online) return;
     setBusy(true);
-    try { const r = await api('profiles?select=username,total_km,top_speed,avg_speed,trips,month_km,month_key,car_brand,car_model,car_year&limit=500'); const j = await r.json(); setRows(Array.isArray(j) ? j : []); } catch { setRows([]); }
+    try {
+      const sel = 'username,total_km,top_speed,avg_speed,trips,month_km,month_key,car_brand,car_model,car_year';
+      let r = await api(`profiles?select=${sel},avg_score,month_score&limit=500`);
+      if (!r.ok) r = await api(`profiles?select=${sel}&limit=500`); // puan kolonları sunucuda henüz yoksa
+      const j = await r.json(); setRows(Array.isArray(j) ? j : []);
+    } catch { setRows([]); }
     setBusy(false);
   };
   useEffect(() => { load(); }, []);
   if (!online) return <View style={{ flex: 1, padding: 20 }}><Text style={s.title}>Sıralama</Text><Text style={s.itemSub}>Sıralama sunucusu henüz bağlanmadı.</Text></View>;
   const nk = monthKey(new Date()), car = me.car || {};
-  const mk = type === 'car' && mi > 0 ? METRICS[mi][0] : period === 'month' ? 'month_km' : 'total_km';
-  const monthly = mk === 'month_km', mu = mk.endsWith('km') ? 'km' : 'km/s';
-  const list = rows.filter((r) => (type !== 'car' || (r.car_brand === car.brand && r.car_model === car.model)) && (!monthly || r.month_key === nk) && (!fr || r.username === me.username || friends.includes(r.username))).sort((a, b) => (b[mk] || 0) - (a[mk] || 0));
+  const isScore = type === 'score';
+  const mk = isScore ? (period === 'month' ? 'month_score' : 'avg_score') : type === 'car' && mi > 0 ? METRICS[mi][0] : period === 'month' ? 'month_km' : 'total_km';
+  const monthly = mk === 'month_km' || mk === 'month_score', mu = isScore ? 'puan' : mk.endsWith('km') ? 'km' : 'km/s';
+  const dist = (r) => (monthly ? r.month_km : r.total_km) || 0;
+  const list = rows.filter((r) => (type !== 'car' || (r.car_brand === car.brand && r.car_model === car.model)) && (!monthly || r.month_key === nk) && (!isScore || (r[mk] != null && dist(r) >= (monthly ? 20 : 50))) && (!fr || r.username === me.username || friends.includes(r.username))).sort((a, b) => (b[mk] || 0) - (a[mk] || 0));
   const val = (r) => (mu === 'km' ? (r[mk] || 0).toFixed(1) : Math.round(r[mk] || 0));
-  const cap = type === 'car' ? `${car.brand} ${car.model} kullananlar · ${monthly ? 'bu ay' : 'tüm zamanlar'}` : monthly ? "Bu ayın km sıralaması. Her ayın 1'inde sıfırlanır." : 'Tüm zamanların toplam km sıralaması';
-  const sub = (r) => [r.car_brand ? `${r.car_brand} ${r.car_model} ${r.car_year || ''}`.trim() : null, monthly ? null : `${r.trips} sürüş`].filter(Boolean).join(' · ');
+  const cap = isScore ? (monthly ? "Bu ayın sürüş puanı sıralaması (en az 20 km). Her ayın 1'inde sıfırlanır." : 'Tüm zamanların ortalama sürüş puanı (en az 50 km)') : type === 'car' ? `${car.brand} ${car.model} kullananlar · ${monthly ? 'bu ay' : 'tüm zamanlar'}` : monthly ? "Bu ayın km sıralaması. Her ayın 1'inde sıfırlanır." : 'Tüm zamanların toplam km sıralaması';
+  const sub = (r) => [r.car_brand ? `${r.car_brand} ${r.car_model} ${r.car_year || ''}`.trim() : null, isScore ? `${dist(r).toFixed(0)} km` : null, monthly || isScore ? null : `${r.trips} sürüş`].filter(Boolean).join(' · ');
   const Pod = ({ r, n, h }) => !r ? <View style={{ flex: 1 }} /> : (
     <View style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end' }}>
       {n === 1 && <Ionicons name="trophy" size={22} color="#FFD60A" />}
@@ -709,7 +775,7 @@ function Board({ me, friends }) {
         <View>
           <Text style={s.title}>TripRank</Text>
           <View style={[s.seg, { position: 'relative', top: 0, alignSelf: 'flex-start', marginBottom: 14 }]}>
-            {[['km', 'Km'], ['car', 'Araç']].map(([k, l]) => (
+            {[['km', 'Km'], ['score', 'Puan'], ['car', 'Araç']].map(([k, l]) => (
               <TouchableOpacity key={k} style={[s.segBtn, { paddingHorizontal: 20 }, type === k && s.segActive]} onPress={() => setType(k)}><Text style={[s.segText, type === k && { color: C.text }]}>{l}</Text></TouchableOpacity>
             ))}
           </View>
@@ -725,7 +791,7 @@ function Board({ me, friends }) {
           </View>
         </View>
       }
-      ListEmptyComponent={list.length ? null : <Text style={s.hint}>{type === 'car' ? 'Aynı aracı kullanan kimse yok.' : monthly ? 'Bu ay henüz kimse sürmedi.' : 'Henüz kimse yok.'}</Text>}
+      ListEmptyComponent={list.length ? null : <Text style={s.hint}>{isScore ? `${monthly ? 'Bu ay' : 'Henüz'} yeterli sürüş yapan kimse yok (en az ${monthly ? 20 : 50} km).` : type === 'car' ? 'Aynı aracı kullanan kimse yok.' : monthly ? 'Bu ay henüz kimse sürmedi.' : 'Henüz kimse yok.'}</Text>}
       renderItem={({ item, index }) => (
         <View style={[s.item, { flexDirection: 'row', alignItems: 'center' }, item.username === me.username && { borderWidth: 1, borderColor: C.accent }]}>
           <Text style={s.rank}>{index + 4}</Text>
@@ -3345,7 +3411,7 @@ function AppInner({ ready }) {
           <View style={s.dBg}>
             <View style={s.dPanel}>
               <Text style={[s.title, { marginBottom: 24 }]}>Menü</Text>
-              {[['friends', 'person-add', 'Arkadaşlar'], ['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
+              {[['friends', 'person-add', 'Arkadaşlar'], ['clubs', 'people', 'Kulüpler'], ['launch', 'speedometer', 'Launch Control'], ['achv', 'trophy', 'Başarımlar'], ['monthly', 'stats-chart', 'Aylık Özet'], ['care', 'construct', 'Bakım ve Yakıt']].map(([k, ic, l]) => (
                 <TouchableOpacity key={k} style={s.dItem} onPress={() => { setMenu(false); setScreen(k); }}><Ionicons name={ic} size={24} color={C.accent} /><Text style={s.itemTitle}>{l}</Text>{k === 'friends' && social.incoming > 0 && <View style={{ backgroundColor: '#FF453A', borderRadius: 11, minWidth: 22, height: 22, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 }}><Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>{social.incoming}</Text></View>}</TouchableOpacity>
               ))}
               <View style={{ flex: 1 }} />
@@ -3361,6 +3427,7 @@ function AppInner({ ready }) {
         {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
         {screen === 'achv' && <AchvScreen badges={badges} got={got} onClose={() => setScreen(null)} />}
+        {screen === 'monthly' && <MonthlyScreen trips={vTrips} name={profile.username} car={profile.car} onClose={() => setScreen(null)} />}
         {screen === 'care' && <CareScreen vehicle={profile.car} vid={activeV} driven={totals(vTrips).dist + (on ? live.dist : 0)} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
         {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onDeleteAccount={doDeleteAccount} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
