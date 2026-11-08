@@ -269,13 +269,14 @@ function Picker({ title, options, onPick, onClose }) {
   );
 }
 
-// ---- Sürüş puanı (0-100): fren, sert hızlanma, viraj, yüksek hız ve G kuvvetinden hesaplanır ----
+// ---- Sürüş puanı (0-100): fren, sert hızlanma, viraj, aşırı hız ve G kuvvetinden hesaplanır ----
 const driveScore = (t) => {
   const km = Math.max(t.dist || 0, 3);
   const ev = (((t.brake || 0) * 1.2 + (t.acc || 0) * 1.0 + (t.corner || 0) * 0.8) / km) * 10;
   const pts = (t.route || []).filter((p) => p.v != null);
-  const fast = pts.length > 5 ? pts.filter((p) => p.v >= 120).length / pts.length : 0;
-  const pen = Math.min(60, ev * 8) + Math.min(20, fast * 40 + (t.max > 160 ? 5 : 0)) + Math.min(10, Math.max(0, (t.maxG || 0) - 0.5) * 20);
+  // Hız: yalnızca belirgin aşım puan düşürür (otoyol sınırı 120, 140 üstü aşırı sayılır). Normal hız ve yavaş sürüş (trafik) etkilemez. En fazla 10 puan.
+  const over = pts.length > 5 ? pts.filter((p) => p.v >= 140).length / pts.length : 0;
+  const pen = Math.min(60, ev * 8) + Math.min(7, over * 30) + (t.max > 170 ? 3 : 0) + Math.min(10, Math.max(0, (t.maxG || 0) - 0.5) * 20);
   return Math.max(0, Math.min(100, Math.round(100 - pen)));
 };
 const tripScore = (t) => (t.score != null ? t.score : driveScore(t));
@@ -3162,7 +3163,7 @@ function AppInner({ ready }) {
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const mov = d.movingMs / 3600000;
     const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: vidRef.current };
-    t.score = driveScore(t);
+    t.score = driveScore(t); t.scoreV = 2;
     const n = [t, ...trips];
     setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
     setTab('profile');
@@ -3221,12 +3222,13 @@ function AppInner({ ready }) {
   useEffect(() => {
     if (!pReady || !ready) return;
     const lim = Date.now() - prefs.keepDays * 864e5;
-    const need = trips.some((t) => (t.route && t.route.length && t.start < lim) || (t.route && t.route.length > 8 && t.turnsV !== 2) || t.still == null);
+    const need = trips.some((t) => (t.route && t.route.length && t.start < lim) || (t.route && t.route.length > 8 && t.turnsV !== 2) || t.still == null || t.scoreV !== 2);
     if (need) {
       const n = trips.map((t) => {
         let x = t;
         if (x.route && x.route.length > 8 && x.turnsV !== 2) { const r = turnsFromRoute(x.route); x = { ...x, left: r.left, right: r.right, turnsV: 2 }; }
         if (x.still == null) x = { ...x, still: x.avg > 0 ? Math.max(0, x.duration - (x.dist / x.avg) * 3600) : 0 };
+        if (x.scoreV !== 2) x = { ...x, score: driveScore(x), scoreV: 2 };
         return x.start < lim && x.route && x.route.length ? { ...x, route: [], pruned: true } : x;
       });
       setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
