@@ -103,10 +103,11 @@ function processLoc(loc) {
     if (hd >= 0 && d.last.hd >= 0 && v > 2 && d.last.v > 2) { sd = ((hd - d.last.hd + 540) % 360) - 180; lat = v * (Math.abs(sd) * Math.PI / 180) / dt; }
     curveStep(d, sd, dt);
     d.latS = d.latS * 0.6 + lat * 0.4; d.aS = d.aS * 0.5 + a * 0.5;
-    d.maxAcc = Math.max(d.maxAcc, Math.min(a, 8)); d.maxDec = Math.max(d.maxDec, Math.min(-a, 8));
+    // Olaylar yumuşatılmış ivmeden sayılır: tek saniyelik GPS hız sıçramaları sahte fren/hızlanma sayılmasın
+    d.maxAcc = Math.max(d.maxAcc, Math.min(d.aS, 8)); d.maxDec = Math.max(d.maxDec, Math.min(-d.aS, 8));
     if (t - d.lastEv > 3000) {
-      if (a > 2.5) { d.acc++; d.lastEv = t; }
-      else if (a < -3) { d.brake++; d.lastEv = t; }
+      if (d.aS > 2.5) { d.acc++; d.lastEv = t; }
+      else if (d.aS < -3) { d.brake++; d.lastEv = t; }
       else if (d.latS > 3) { d.corner++; d.lastEv = t; }
     }
     d.maxG = Math.max(d.maxG, Math.min(Math.sqrt(d.aS * d.aS + d.latS * d.latS) / G, 2.5));
