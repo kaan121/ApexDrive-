@@ -43,9 +43,36 @@ const fmtTime = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = 
 const fmtDate = (t) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 // ---- Sürüş motoru: arka plan görevi ve ekran aynı veriyi kullanır ----
-const fresh = () => ({ t0: Date.now(), last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0, kf: null, rej: 0, cdir: 0, csum: 0, cquiet: 0 });
+const fresh = (veh) => ({ t0: Date.now(), veh: veh || 'v0', last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0, kf: null, rej: 0, cdir: 0, csum: 0, cquiet: 0 });
 let R = fresh();
 let onTick = null;
+
+// ---- Sürüş kaydının kalıcılığı: uygulama arka planda kapansa/yeniden açılsa bile sürüş kaybolmasın ----
+const DKEY = '@apexdrive_drive';
+let driving = false, endedT0 = 0, lastSave = 0, watchSub = null;
+function persistDrive(force) {
+  const now = Date.now();
+  if (!driving || (!force && now - lastSave < 8000)) return;
+  lastSave = now;
+  const { kf, last, ...rest } = R; // yumuşatma ve son örnek yeniden başlayınca sıfırlanır
+  AsyncStorage.setItem(DKEY, JSON.stringify({ ...rest, savedAt: now })).catch(() => {});
+}
+async function loadSnap() {
+  try {
+    const v = await AsyncStorage.getItem(DKEY);
+    if (!v) return null;
+    const s = JSON.parse(v);
+    if (!s || !s.t0 || s.t0 === endedT0 || Date.now() - (s.savedAt || 0) > 12 * 3600e3) return null;
+    return { ...fresh(s.veh), ...s, last: null, kf: null, stillSince: 0 };
+  } catch { return null; }
+}
+async function reviveDrive() {
+  if (driving) return true;
+  const s = await loadSnap();
+  if (!s) return false;
+  R = s; driving = true;
+  return true;
+}
 
 const bearing = (a, b) => {
   const r = Math.PI / 180, dl = (b.longitude - a.longitude) * r;
@@ -85,6 +112,7 @@ function smooth(d, c, t, v) {
   return k;
 }
 function processLoc(loc) {
+  if (!driving) return;
   const c = loc.coords, t = loc.timestamp, d = R;
   if (c.accuracy > 22) return;
   const dt = d.last ? (t - d.last.t) / 1000 : 0;
@@ -119,6 +147,7 @@ function processLoc(loc) {
   const back = lp && v > 3 && c.heading >= 0 && angDiff(bearing(lp, pos), c.heading) > 100; // geri sapan titreşim noktaları atılır
   if ((!lp || (v > 2 && hav(lp, pos) > 0.008 && !back)) && d.route.length < 4000) d.route.push({ latitude: pos.latitude, longitude: pos.longitude, v: Math.round(v * 3.6) });
   d.last = { c, t, v, hd, pos };
+  persistDrive();
   onTick && onTick();
 }
 // Rotayı yola oturtma (OpenStreetMap yol verisi, OSRM)
@@ -141,7 +170,12 @@ async function snapRoute(route) {
   return out.length > 1 ? out.filter((_, i) => i % k === 0 || i === out.length - 1) : null;
 }
 Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
-TaskManager.defineTask(TASK, ({ data, error }) => { if (!error && data?.locations) data.locations.forEach(processLoc); });
+TaskManager.defineTask(TASK, async ({ data, error }) => {
+  if (error || !data?.locations) return;
+  // Uygulama yeniden başlamışsa kayıtlı sürüşe devam et; kayıtlı sürüş yoksa takibi durdur (hayalet kayıt olmasın)
+  if (!driving && !(await reviveDrive())) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} return; }
+  data.locations.forEach(processLoc);
+});
 async function fetchLatest() {
   if (!GH_REPO) return null;
   const j = await (await fetch(`https://api.github.com/repos/${GH_REPO}/releases/latest`)).json();
@@ -2133,6 +2167,8 @@ function ClubMedia({ club, onClose }) {
 }
 function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
   const R = useRel();
+  const [muted, setMuted] = useState(null);
+  useEffect(() => { rpc('club_mute_list').then((j) => setMuted(Array.isArray(j) ? j.some((x) => x.club_id === club.id) : null)); }, []);
   const [sel, setSel] = useState(null), [media, setMedia] = useState(false), [nm, setNm] = useState(club.name), [ab, setAb] = useState(club.about || '');
   const isOwner = club.owner === me.username, mine = mem.find((m) => m.username === me.username), isAdmin = !!mine && mine.role === 'admin', isM = !!mine || isOwner;
   const can = (m) => m.username !== me.username && m.username !== club.owner && (isOwner || (isAdmin && m.role !== 'admin'));
@@ -2188,6 +2224,11 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
               </View>
             ) : (<View style={{ alignItems: 'center' }}><Text style={[s.name, { marginTop: 10 }]}>{club.name}</Text>{!!club.about && <Text style={s.itemSub}>{club.about}</Text>}</View>)}
           </View>
+          {isM && muted !== null && (
+            <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => { const v = !muted; setMuted(v); rpc('club_mute_set', { p_club: club.id, p_muted: v }); }}>
+              <Ionicons name={muted ? 'notifications-off' : 'notifications'} size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Kulüp bildirimleri</Text><Text style={s.itemSub}>{muted ? 'Sessiz' : 'Açık'}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => setMedia(true)}>
             <Ionicons name="images" size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Medya, dosya ve linkler</Text><Ionicons name="chevron-forward" size={20} color={C.dim} />
           </TouchableOpacity>
@@ -2544,6 +2585,24 @@ function ClubView({ club: club0, me, onBack }) {
 const rpc = async (fn, args = {}) => {
   try { const r = await api(`rpc/${fn}`, { method: 'POST', body: JSON.stringify(args) }); return r.ok ? await r.json() : null; } catch { return null; }
 };
+// ---- Anlık bildirim (push): telefonun Firebase kimliğini sunucuya kaydeder ----
+async function registerPush() {
+  try {
+    if (Platform.OS !== 'android' || !online) return;
+    const perm = await Notifications.requestPermissionsAsync();
+    if (!perm.granted) return;
+    await Notifications.setNotificationChannelAsync('default', { name: 'Hatırlatmalar', importance: Notifications.AndroidImportance.HIGH });
+    const tk = await Notifications.getDevicePushTokenAsync();
+    if (tk && tk.data) await rpc('push_register', { p_token: String(tk.data) });
+  } catch {}
+}
+async function unregisterPush() {
+  try {
+    if (Platform.OS !== 'android') return;
+    const tk = await Notifications.getDevicePushTokenAsync();
+    if (tk && tk.data) await rpc('push_unregister', { p_token: String(tk.data) });
+  } catch {}
+}
 function useRel() {
   const [list, setList] = useState(null);
   const load = async () => { const j = await rpc('friend_list'); setList(Array.isArray(j) ? j : 'err'); };
@@ -2628,8 +2687,9 @@ function FriendsScreen({ me, onClose, onChanged }) {
   );
 }
 
-function ClubsScreen({ me, onClose }) {
+function ClubsScreen({ me, onClose, openId }) {
   const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState('');
+  const opened = useRef(false);
   const load = async () => {
     if (!online) return;
     try {
@@ -2637,6 +2697,7 @@ function ClubsScreen({ me, onClose }) {
       if (!r.ok) r = await api('clubs?select=id,name,about,vtype,owner&order=created_at.desc&limit=100');
       const c = await r.json();
       setClubs(Array.isArray(c) ? c : []);
+      if (openId && !opened.current && Array.isArray(c)) { const hit = c.find((x) => String(x.id) === String(openId)); if (hit) { opened.current = true; setSel(hit); } }
       const m = await (await api(`club_members?username=eq.${me.username}&select=club_id`)).json();
       setMine(Array.isArray(m) ? m.map((x) => x.club_id) : []);
     } catch {}
@@ -2705,6 +2766,9 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
+  const [pp, setPp] = useState(null);
+  useEffect(() => { if (cat === 'notif' && online) rpc('push_prefs_get').then((j) => setPp(Array.isArray(j) && j[0] ? j[0] : 'err')); }, [cat]);
+  const setPref = (k, v) => { const n = { ...pp, [k]: v }; setPp(n); rpc('push_prefs_set', { p_friends: n.friends, p_clubs: n.clubs, p_events: n.events }); };
   const ping = async () => {
     if (!online) return setSv('Sunucu adresi ayarlı değil (config.js boş).');
     setSv('Deneniyor...');
@@ -2762,6 +2826,16 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
     ),
     notif: (
       <>
+        {online && pp && pp !== 'err' && (
+          <Box title="Anlık bildirimler" sub="Uygulama kapalıyken de telefonuna gelir. Kulüp mesajlarını tek tek kulüp ayarlarından sessize alabilirsin.">
+            <Text style={[s.cLabel, { marginTop: 12 }]}>Arkadaşlık istekleri</Text>
+            <Chips opts={[['Kapalı', false], ['Açık', true]]} val={pp.friends} onPick={(v) => setPref('friends', v)} />
+            <Text style={[s.cLabel, { marginTop: 12 }]}>Kulüp mesajları</Text>
+            <Chips opts={[['Kapalı', false], ['Açık', true]]} val={pp.clubs} onPick={(v) => setPref('clubs', v)} />
+            <Text style={[s.cLabel, { marginTop: 12 }]}>Kulüp etkinlikleri</Text>
+            <Chips opts={[['Kapalı', false], ['Açık', true]]} val={pp.events} onPick={(v) => setPref('events', v)} />
+          </Box>
+        )}
         <Box title="Gazlama bildirimleri" sub="Günde 3 kez, rastgele saatlerde (10:00–21:30 arası) sürüşe çıkmak ister misin diye sorar. O gün sürüş yaptıysan atlanır."><Chips opts={[['Kapalı', 0], ['Açık', 1]]} val={prefs.daily ? 1 : 0} onPick={(v) => setPrefs({ ...prefs, daily: v })} /></Box>
         {Platform.OS === 'android' && (
           <Box title="Arka planda bildirim" sub="Uygulama kapalıyken yeni sürüm bildiriminin gelmesi için telefonun uygulamayı arka planda çalıştırmasına izin vermesi gerekir. Xiaomi/POCO'da iki ayarı da aç.">
@@ -3047,7 +3121,7 @@ function NewsSheet({ items, onClose }) {
 }
 function AppInner({ ready }) {
   const sysScheme = useColorScheme();
-  const [acct, setAcct] = useState('loading'), [link, setLink] = useState('wait'), [got, setGot] = useState({});
+  const [acct, setAcct] = useState('loading'), [link, setLink] = useState('wait'), [got, setGot] = useState({}), [pushClub, setPushClub] = useState(null);
   useEffect(() => {
     if (!online) { setAcct('in'); setLink('ok'); return; }
     restore().then((u) => setAcct(u ? 'in' : 'out')).catch(() => setAcct('out'));
@@ -3077,10 +3151,10 @@ function AppInner({ ready }) {
   const [on, setOn] = useState(false);
   const [live, setLive] = useState({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
   const [route, setRoute] = useState([]);
-  const regionsRef = useRef({}), lastGeo = useRef(null), onRef = useRef(false), pending = useRef(null), sub = useRef(null), checkRef = useRef(() => {});
+  const regionsRef = useRef({}), lastGeo = useRef(null), onRef = useRef(false), pending = useRef(null), checkRef = useRef(() => {});
 
   useEffect(() => {
-    AsyncStorage.getItem(KEY).then((v) => v && setTrips(JSON.parse(v))).catch(() => {});
+    AsyncStorage.getItem(KEY).then((v) => (v ? JSON.parse(v) : [])).catch(() => []).then((list) => { setTrips(list); resumeDrive(list); });
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
     AsyncStorage.getItem(RKEY).then((v) => { if (v) { regionsRef.current = JSON.parse(v); setRegions(regionsRef.current); } }).catch(() => {});
     Location.requestForegroundPermissionsAsync().catch(() => {});
@@ -3136,37 +3210,73 @@ function AppInner({ ready }) {
     setCur((c) => (c && c.key === key ? { ...c, photo: photos[0] } : c));
   };
 
+  // Sürüşü kaydeder (normal bitiş ya da yarıda kalan sürüş). base: o an kayıtlı sürüş listesi
+  const finishTrip = (d, base, interrupted) => {
+    finishCurve(d);
+    const duration = ((interrupted ? d.savedAt || Date.now() : Date.now()) - d.t0) / 1000, mov = d.movingMs / 3600000;
+    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: d.veh || 'v0' };
+    t.score = driveScore(t); t.scoreV = 2;
+    const n = [t, ...base];
+    setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
+    return t;
+  };
+  // Ekranı sürüşün gerçek durumuna getirir (uygulama yeniden açılınca "Başlat" görünüp kaydı bozmasın)
+  const reflectDrive = () => {
+    vidRef.current = R.veh || 'v0'; onRef.current = true; setOn(true);
+    setLive({ speed: R.last ? R.last.v * 3.6 : 0, dist: R.dist, max: R.max, g: R.maxG, secs: (Date.now() - R.t0) / 1000 });
+    setRoute(R.route.slice());
+  };
+  const finishInterrupted = (d, list) => {
+    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {});
+    if (d.dist < 0.05 || list.some((x) => x.id === String(d.t0))) return; // çok kısa ya da zaten kayıtlı
+    finishTrip(d, list, true);
+    AlertX.alert('Yarım kalan sürüşün kaydedildi', `${d.dist.toFixed(1)} km. Uygulama sürüş sırasında kapanmış ya da konum takibi durmuş. Kayıt kesildiği ana kadar saklandı. Sık yaşanıyorsa Ayarlar → Bildirimler bölümünden pil kısıtlamasını ve otomatik başlatma iznini aç.`);
+  };
+  const resumeDrive = async (list) => {
+    let running = false;
+    try { running = await Location.hasStartedLocationUpdatesAsync(TASK); } catch {}
+    if (driving) { if (running || watchSub) reflectDrive(); else finishInterrupted(R, list); return; }
+    const snap = await loadSnap();
+    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } return; }
+    if (running) { R = snap; driving = true; reflectDrive(); } else finishInterrupted(snap, list);
+  };
+
   const start = async () => {
+    if (driving) return reflectDrive();
     vidRef.current = (profile && profile.vid) || 'v0';
     const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
     await Location.requestBackgroundPermissionsAsync().catch(() => {});
-    R = fresh();
+    const bg = await Location.getBackgroundPermissionsAsync().catch(() => ({ status: 'denied' }));
+    if (bg.status !== 'granted') {
+      const go = await new Promise((res) => AlertX.alert('Arka planda kayıt kapalı', 'Konum izni "Her zaman izin ver" değil. Uygulamayı arka plana atarsan ya da ekran kapanırsa kayıt durabilir ve sürüş kaybolabilir.', [{ text: 'Ayarları aç', style: 'cancel', onPress: () => { Linking.openSettings(); res(false); } }, { text: 'Yine de başla', onPress: () => res(true) }]));
+      if (!go) return;
+    }
+    R = fresh(vidRef.current); driving = true; lastSave = 0; endedT0 = 0;
+    persistDrive(true);
     setLive({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
     setRoute([]);
     const opts = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 };
     try {
-      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Sürüşün kaydediliyor' } });
+      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Sürüşün kaydediliyor', killServiceOnDestroy: false } });
     } catch {
-      // Arka plan desteklenmiyorsa (ör. Expo Go) ön plan takibine düş
-      sub.current = await Location.watchPositionAsync(opts, processLoc);
+      // Arka plan takibi başlamadıysa ön plan takibine düş ve kullanıcıyı uyar
+      try { watchSub = await Location.watchPositionAsync(opts, processLoc); } catch { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return AlertX.alert('Konum alınamadı', 'Konum servisini ve iznini kontrol edip tekrar dene.'); }
+      AlertX.alert('Arka plan takibi başlatılamadı', 'Sürüş sadece uygulama açıkken ve ekran açıkken kaydedilir. Konum iznini "Her zaman izin ver" yapmayı dene.');
     }
     onRef.current = true; setOn(true);
   };
 
   const stop = async () => {
+    const d = R;
+    driving = false; endedT0 = d.t0; // geç gelen konum noktaları artık işlenmez
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
-    sub.current?.remove(); sub.current = null;
+    if (watchSub) { watchSub.remove(); watchSub = null; }
+    AsyncStorage.removeItem(DKEY).catch(() => {});
     onRef.current = false; setOn(false);
     if (pending.current) { setAsk(pending.current); pending.current = null; }
-    finishCurve(R);
-    const d = R, duration = (Date.now() - d.t0) / 1000;
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
-    const mov = d.movingMs / 3600000;
-    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: vidRef.current };
-    t.score = driveScore(t); t.scoreV = 2;
-    const n = [t, ...trips];
-    setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
+    const t = finishTrip(d, trips, false);
     setTab('profile');
     setShareTrip(t);
   };
@@ -3289,6 +3399,12 @@ function AppInner({ ready }) {
   };
   useEffect(() => { if (online && acct === 'in' && link === 'ok' && profile && profile.linked) loadSocial(); }, [acct, link, !!profile]);
   useEffect(() => {
+    if (!(online && acct === 'in' && link === 'ok' && profile && profile.linked)) return;
+    registerPush();
+    const sub = Notifications.addPushTokenListener((tk) => { rpc('push_register', { p_token: String(tk.data) }); });
+    return () => sub.remove();
+  }, [acct, link, !!profile]);
+  useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
   }, []);
   useEffect(() => {
@@ -3317,7 +3433,7 @@ function AppInner({ ready }) {
     });
     return () => sub.remove();
   }, []);
-  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') notifyUpdate(); }); return () => sub.remove(); }, []);
+  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') { notifyUpdate(); if (driving) reflectDrive(); } else persistDrive(true); }); return () => sub.remove(); }, []);
   useEffect(() => { AsyncStorage.getItem(LKEY).then((v) => v && setLaunches(JSON.parse(v))).catch(() => {}); }, []);
   const saveLaunch = (r) => setLaunches((p) => { const n = [r, ...p].slice(0, 200); AsyncStorage.setItem(LKEY, JSON.stringify(n)).catch(() => {}); return n; });
   useEffect(() => { if (pReady && ready) scheduleDaily(prefs, trips); }, [pReady, ready, prefs.daily, trips.length]);
@@ -3332,8 +3448,8 @@ function AppInner({ ready }) {
       const id = r.notification.request.identifier + ':' + r.notification.date;
       if ((await AsyncStorage.getItem('@apexdrive_resp')) === id) return;
       await AsyncStorage.setItem('@apexdrive_resp', id);
-      const to = r.notification.request.content.data && r.notification.request.content.data.to;
-      if (to === 'update') { setAutoUpd(true); setSettingsOpen(true); } else if (to === 'drive') setTab('drive');
+      const d = r.notification.request.content.data || {}, to = d.to;
+      if (to === 'update') { setAutoUpd(true); setSettingsOpen(true); } else if (to === 'drive') setTab('drive'); else if (to === 'friends') setScreen('friends'); else if (to === 'club') { setPushClub(d.club || null); setScreen('clubs'); }
     };
     Notifications.getLastNotificationResponseAsync().then(go).catch(() => {});
     const sub = Notifications.addNotificationResponseReceivedListener((r) => { go(r).catch(() => {}); });
@@ -3351,7 +3467,7 @@ function AppInner({ ready }) {
   if (profile === null) return shell(<Welcome onDone={saveProfile} />);
   if (!profile.car) return shell(<Welcome existing={profile} onDone={saveProfile} />);
   const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
-  const doSignOut = () => AlertX.alert('Çıkış yapılsın mı?', 'Sürüş kayıtların bu telefonda kalır. Tekrar giriş yapınca hesabına bağlanırsın.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkış yap', style: 'destructive', onPress: async () => { await signOut(); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out'); } }]);
+  const doSignOut = () => AlertX.alert('Çıkış yapılsın mı?', 'Sürüş kayıtların bu telefonda kalır. Tekrar giriş yapınca hesabına bağlanırsın.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkış yap', style: 'destructive', onPress: async () => { await unregisterPush(); await signOut(); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out'); } }]);
   const runDelete = async () => {
     const fail = () => AlertX.alert('Hesap silinemedi', 'İnternetini kontrol edip tekrar dene. Sorun sürerse sunucuda hesap silme güncellemesi (SQL) eksik olabilir.');
     try {
@@ -3427,7 +3543,7 @@ function AppInner({ ready }) {
           </View>
         </Modal>
         {screen === 'friends' && <FriendsScreen me={profile} onClose={() => setScreen(null)} onChanged={loadSocial} />}
-        {screen === 'clubs' && <ClubsScreen me={profile} onClose={() => setScreen(null)} />}
+        {screen === 'clubs' && <ClubsScreen me={profile} openId={pushClub} onClose={() => { setScreen(null); setPushClub(null); }} />}
         {screen === 'launch' && <LaunchScreen vehicle={profile.car} runs={launches.filter((r) => (r.veh || 'v0') === activeV)} onSave={(r) => saveLaunch({ ...r, veh: activeV })} onClose={() => setScreen(null)} />}
         {screen === 'achv' && <AchvScreen badges={badges} got={got} onClose={() => setScreen(null)} />}
         {screen === 'monthly' && <MonthlyScreen trips={vTrips} name={profile.username} car={profile.car} onClose={() => setScreen(null)} />}
