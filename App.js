@@ -42,8 +42,97 @@ const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 36
 const fmtTime = (s) => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return `${h ? h + ':' : ''}${String(m).padStart(h ? 2 : 1, '0')}:${String(s % 60).padStart(2, '0')}`; };
 const fmtDate = (t) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
+// ---- Sürüş kayıtlarının depolaması ----
+// Android'de tek bir kayıt 2 MB'tan büyük okunamaz, toplam depolama 6 MB'tır. Bu yüzden her sürüşün rotası
+// ayrı bir kayıtta ve küçültülmüş (fark kodlamalı, ~1 m hassasiyet) biçimde tutulur; liste rotasız tutulur.
+const TKEY = '@apexdrive_trips_v2', MKEY = '@apexdrive_trips_migrated', RPRE = '@apexdrive_route_';
+const encRoute = (r) => {
+  const o = []; let a = 0, b = 0, c = 0;
+  for (const p of r || []) {
+    const x = Math.round(p.latitude * 1e5), y = Math.round(p.longitude * 1e5), v = p.v == null ? -1 : Math.round(p.v);
+    o.push(x - a, y - b, v - c); a = x; b = y; c = v;
+  }
+  return o;
+};
+const decRoute = (o) => {
+  const r = []; let a = 0, b = 0, c = 0;
+  for (let i = 0; i + 2 < (o || []).length; i += 3) {
+    a += o[i]; b += o[i + 1]; c += o[i + 2];
+    r.push(c < 0 ? { latitude: a / 1e5, longitude: b / 1e5 } : { latitude: a / 1e5, longitude: b / 1e5, v: c });
+  }
+  return r;
+};
+const rkey = (id) => RPRE + id;
+const stored = new Map(); // id -> { r, w }: en son diske yazılan rota nesneleri (değişmeyeni tekrar yazmamak için)
+let tq = Promise.resolve(), warned = false, readOnly = false;
+const safeGet = async (k) => { try { return { ok: true, v: await AsyncStorage.getItem(k) }; } catch { return { ok: false, v: null }; } };
+async function doPersist(list) {
+  const ids = new Set(list.map((x) => x.id));
+  // 1) değişen rotaları yaz  2) listeyi yaz  3) silinenlerin rotalarını temizle. Sıra önemli: liste hiçbir zaman eksik rotaya işaret etmez.
+  for (const x of list) {
+    const s = stored.get(x.id);
+    if (s && s.r === x.route && s.w === x.raw) continue;
+    const has = (x.route && x.route.length) || (x.raw && x.raw.length);
+    if (!has) await AsyncStorage.removeItem(rkey(x.id));
+    else await AsyncStorage.setItem(rkey(x.id), JSON.stringify({ r: encRoute(x.route), ...(x.raw && x.raw.length ? { w: encRoute(x.raw) } : {}) }));
+    stored.set(x.id, { r: x.route, w: x.raw });
+  }
+  await AsyncStorage.setItem(TKEY, JSON.stringify(list.map(({ route, raw, ...m }) => m)));
+  for (const id of [...stored.keys()]) if (!ids.has(id)) { await AsyncStorage.removeItem(rkey(id)); stored.delete(id); }
+}
+// Sıraya girer (üst üste çağrılar karışmaz). Başarılıysa true döner; başarısızlıkta bir kez uyarır.
+function persistTrips(list) {
+  if (readOnly) return Promise.resolve(false);
+  const p = tq.then(() => doPersist(list)).then(() => true, () => {
+    if (!warned) { warned = true; AlertX.alert('Sürüşler kaydedilemedi', 'Telefon depolaması dolu olabilir. Yer açıp tekrar dene, yeni sürüşler kaybolabilir.'); }
+    return false;
+  });
+  tq = p;
+  return p;
+}
+async function verifyTrips(list) {
+  try {
+    const meta = JSON.parse((await AsyncStorage.getItem(TKEY)) || '[]');
+    if (meta.length !== list.length) return false;
+    const wr = list.filter((x) => (x.route && x.route.length) || (x.raw && x.raw.length));
+    const got = wr.length ? await AsyncStorage.multiGet(wr.map((x) => rkey(x.id))) : [];
+    return got.every((g, i) => { const o = g[1] && JSON.parse(g[1]); return !!o && decRoute(o.r).length === (wr[i].route || []).length; });
+  } catch { return false; }
+}
+// Sürüşleri okur. Eski biçimdeki (tek kayıt) liste varsa güvenle yeni biçime taşır; eskisini ancak doğrulanınca siler.
+// Okuma başarısız olursa ASLA üzerine yazmaz (readOnly).
+async function loadTrips() {
+  let list = [], blocked = false;
+  const idx = await safeGet(TKEY);
+  if (idx.ok && idx.v) {
+    try {
+      const meta = JSON.parse(idx.v), got = meta.length ? await AsyncStorage.multiGet(meta.map((m) => rkey(m.id))) : [];
+      list = meta.map((m, i) => { const o = got[i] && got[i][1] ? JSON.parse(got[i][1]) : null; return o ? { ...m, route: decRoute(o.r), ...(o.w ? { raw: decRoute(o.w) } : {}) } : { ...m, route: [] }; });
+    } catch { blocked = true; }
+  } else if (!idx.ok) blocked = true;
+  if (blocked) { readOnly = true; return { list: [], blocked }; }
+  list.forEach((x) => stored.set(x.id, { r: x.route, w: x.raw }));
+  const done = await safeGet(MKEY);
+  if (!(done.ok && done.v)) {
+    const old = await safeGet(KEY);
+    if (old.ok && !old.v) await AsyncStorage.setItem(MKEY, '1').catch(() => {});
+    else if (old.ok) {
+      try {
+        const oldList = JSON.parse(old.v);
+        if (Array.isArray(oldList)) {
+          const have = new Set(list.map((x) => x.id));
+          const merged = [...list, ...oldList.filter((x) => x && x.id && !have.has(x.id))].sort((a, b) => b.start - a.start);
+          if ((await persistTrips(merged)) && (await verifyTrips(merged))) { await AsyncStorage.removeItem(KEY).catch(() => {}); await AsyncStorage.setItem(MKEY, '1').catch(() => {}); }
+          list = merged;
+        }
+      } catch {}
+    }
+  }
+  return { list, blocked };
+}
+
 // ---- Sürüş motoru: arka plan görevi ve ekran aynı veriyi kullanır ----
-const fresh = (veh) => ({ t0: Date.now(), veh: veh || 'v0', last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0, kf: null, rej: 0, cdir: 0, csum: 0, cquiet: 0 });
+const fresh = (veh) => ({ t0: Date.now(), veh: veh || 'v0', rsp: 0.008, last: null, dist: 0, max: 0, movingMs: 0, acc: 0, brake: 0, corner: 0, stops: 0, maxG: 0, moved: false, stopped: false, lastEv: 0, route: [], left: 0, right: 0, maxDec: 0, maxAcc: 0, lastTurn: 0, turn: 0, latS: 0, aS: 0, stillSince: 0, kf: null, rej: 0, cdir: 0, csum: 0, cquiet: 0 });
 let R = fresh();
 let onTick = null;
 
@@ -54,8 +143,8 @@ function persistDrive(force) {
   const now = Date.now();
   if (!driving || (!force && now - lastSave < 8000)) return;
   lastSave = now;
-  const { kf, last, ...rest } = R; // yumuşatma ve son örnek yeniden başlayınca sıfırlanır
-  AsyncStorage.setItem(DKEY, JSON.stringify({ ...rest, savedAt: now })).catch(() => {});
+  const { kf, last, route, ...rest } = R; // yumuşatma ve son örnek yeniden başlayınca sıfırlanır
+  AsyncStorage.setItem(DKEY, JSON.stringify({ ...rest, rt: encRoute(route), savedAt: now })).catch(() => {});
 }
 async function loadSnap() {
   try {
@@ -63,7 +152,7 @@ async function loadSnap() {
     if (!v) return null;
     const s = JSON.parse(v);
     if (!s || !s.t0 || s.t0 === endedT0 || Date.now() - (s.savedAt || 0) > 12 * 3600e3) return null;
-    return { ...fresh(s.veh), ...s, last: null, kf: null, stillSince: 0 };
+    return { ...fresh(s.veh), ...s, route: s.rt ? decRoute(s.rt) : s.route || [], last: null, kf: null, stillSince: 0 };
   } catch { return null; }
 }
 async function reviveDrive() {
@@ -145,7 +234,11 @@ function processLoc(loc) {
   if (v * 3.6 < 400 && v > 1) d.max = Math.max(d.max, v * 3.6);
   const lp = d.route[d.route.length - 1];
   const back = lp && v > 3 && c.heading >= 0 && angDiff(bearing(lp, pos), c.heading) > 100; // geri sapan titreşim noktaları atılır
-  if ((!lp || (v > 2 && hav(lp, pos) > 0.008 && !back)) && d.route.length < 4000) d.route.push({ latitude: pos.latitude, longitude: pos.longitude, v: Math.round(v * 3.6) });
+  if (!lp || (v > 2 && hav(lp, pos) > (d.rsp || 0.008) && !back)) {
+    d.route.push({ latitude: pos.latitude, longitude: pos.longitude, v: Math.round(v * 3.6) });
+    // Uzun sürüşte rotayı kesme: 4000 noktaya gelince noktaları seyrelt ve aralığı ikiye katla
+    if (d.route.length >= 4000) { d.route = d.route.filter((_, i, a) => i % 2 === 0 || i === a.length - 1); d.rsp = (d.rsp || 0.008) * 2; }
+  }
   d.last = { c, t, v, hd, pos };
   persistDrive();
   onTick && onTick();
@@ -962,7 +1055,7 @@ function LaunchSection({ runs }) {
 function Profile({ me, trips, terr, launches = [], onUpdate, onAvatar, onDelete }) {
   const [sel, setSel] = useState(null);
   useBack(!!sel, () => setSel(null));
-  if (sel) return <Detail t={trips.find((x) => x.id === sel.id) || sel} onBack={() => setSel(null)} onDelete={() => { onDelete(sel.id); setSel(null); }} onUpdate={onUpdate} />;
+  if (sel) return <Detail t={trips.find((x) => x.id === sel.id) || sel} onBack={() => setSel(null)} onDelete={() => AlertX.alert('Sürüş silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => { onDelete(sel.id); setSel(null); } }])} onUpdate={onUpdate} />;
   const tt = totals(trips), avgS = avgScore(trips);
   const lp = tt.left + tt.right ? (tt.left / (tt.left + tt.right)) * 100 : 50;
   return (
@@ -3154,7 +3247,10 @@ function AppInner({ ready }) {
   const regionsRef = useRef({}), lastGeo = useRef(null), onRef = useRef(false), pending = useRef(null), checkRef = useRef(() => {});
 
   useEffect(() => {
-    AsyncStorage.getItem(KEY).then((v) => (v ? JSON.parse(v) : [])).catch(() => []).then((list) => { setTrips(list); resumeDrive(list); });
+    loadTrips().then(({ list, blocked }) => {
+      setTrips(list); resumeDrive(list);
+      if (blocked) AlertX.alert('Sürüş kayıtları okunamadı', 'Kayıtların korunması için yeni sürüşler bu oturumda kaydedilmeyecek. Lütfen uygulamayı yeniden başlat; sorun sürerse bize bildir.');
+    });
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
     AsyncStorage.getItem(RKEY).then((v) => { if (v) { regionsRef.current = JSON.parse(v); setRegions(regionsRef.current); } }).catch(() => {});
     Location.requestForegroundPermissionsAsync().catch(() => {});
@@ -3217,7 +3313,7 @@ function AppInner({ ready }) {
     const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: d.veh || 'v0' };
     t.score = driveScore(t); t.scoreV = 2;
     const n = [t, ...base];
-    setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
+    setTrips(n); persistTrips(n);
     return t;
   };
   // Ekranı sürüşün gerçek durumuna getirir (uygulama yeniden açılınca "Başlat" görünüp kaydı bozmasın)
@@ -3342,7 +3438,7 @@ function AppInner({ ready }) {
         if (x.scoreV !== 2) x = { ...x, score: driveScore(x), scoreV: 2 };
         return x.start < lim && x.route && x.route.length ? { ...x, route: [], pruned: true } : x;
       });
-      setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {});
+      setTrips(n); persistTrips(n);
     }
   }, [trips, prefs.keepDays, pReady, ready]);
   useEffect(() => {
@@ -3455,8 +3551,8 @@ function AppInner({ ready }) {
     const sub = Notifications.addNotificationResponseReceivedListener((r) => { go(r).catch(() => {}); });
     return () => sub.remove();
   }, []);
-  const updateTrip = (id, patch) => setTrips((p) => { const n = p.map((t) => (t.id === id ? { ...t, ...patch } : t)); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); return n; });
-  const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); AsyncStorage.setItem(KEY, JSON.stringify(n)).catch(() => {}); };
+  const updateTrip = (id, patch) => setTrips((p) => { const n = p.map((t) => (t.id === id ? { ...t, ...patch } : t)); persistTrips(n); return n; });
+  const del = (id) => { const n = trips.filter((t) => t.id !== id); setTrips(n); persistTrips(n); };
 
   ME.car = profile && profile.car ? `${profile.car.brand} ${profile.car.model}` : '';
   const shell = (child) => (<SafeAreaProvider><SafeAreaView style={s.root}><StatusBar style={C === LIGHT ? 'dark' : 'light'} />{child}<DialogHost dlg={dlg} onClose={() => setDlg(null)} /></SafeAreaView></SafeAreaProvider>);
@@ -3490,7 +3586,7 @@ function AppInner({ ready }) {
     const n = trips.filter((t) => (t.veh || 'v0') === id).length;
     AlertX.alert('Araç silinsin mi?', `${v.brand} ${v.model}${n ? ` ve ${n} sürüşü silinecek.` : ' silinecek.'}`, [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => {
       saveProfile(dropVehicle(profile, id));
-      setTrips((p) => { const nt = p.filter((t) => (t.veh || 'v0') !== id); AsyncStorage.setItem(KEY, JSON.stringify(nt)).catch(() => {}); return nt; });
+      setTrips((p) => { const nt = p.filter((t) => (t.veh || 'v0') !== id); persistTrips(nt); return nt; });
       setDocsBy((p) => { const nd = { ...p }; delete nd[id]; return nd; });
     } }]);
   };
