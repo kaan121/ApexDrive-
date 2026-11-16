@@ -5,7 +5,7 @@ import * as Notifications from 'expo-notifications';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as SplashScreen from 'expo-splash-screen';
 import * as BackgroundTask from 'expo-background-task';
-import { Audio } from 'expo-av';
+import { Audio, Video, ResizeMode } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as CFG from './config';
@@ -163,6 +163,38 @@ async function reviveDrive() {
   return true;
 }
 
+// ---- "Sürüşün kaydediliyor" bildirimi ----
+// Android 14+ sürekli bildirimleri kullanıcı kaydırarak silebilir ve uygulama bunu engelleyemez. Bu yüzden sürüş sürerken
+// bildirim silinirse en geç 10 saniye içinde yeniden gösterilir. Sürüş bitince (ya da yarım kalan sürüş kaydedilince) silinir.
+const REC_ID = 'ad-recording';
+let recAt = 0;
+async function showRecNotice(ask) {
+  try {
+    if (Platform.OS !== 'android') return;
+    const p = ask ? await Notifications.requestPermissionsAsync() : await Notifications.getPermissionsAsync();
+    if (!p.granted) return;
+    await Notifications.setNotificationChannelAsync('recording', { name: 'Sürüş kaydı', importance: Notifications.AndroidImportance.LOW });
+    await Notifications.scheduleNotificationAsync({ identifier: REC_ID, content: { title: 'ApexDrive', body: 'Sürüşün kaydediliyor', sticky: true, autoDismiss: false, data: { rec: 1, to: 'drive' } }, trigger: { channelId: 'recording' } });
+    recAt = Date.now();
+  } catch {}
+}
+async function ensureRecNotice(force) {
+  if (!driving || Platform.OS !== 'android') return;
+  const now = Date.now();
+  if (!force && now - recAt < 10000) return;
+  recAt = now;
+  try {
+    const shown = await Notifications.getPresentedNotificationsAsync();
+    if (shown.some((n) => n.request.identifier === REC_ID)) return;
+  } catch {}
+  await showRecNotice(false);
+}
+async function hideRecNotice() {
+  recAt = 0;
+  try { await Notifications.dismissNotificationAsync(REC_ID); } catch {}
+  try { await Notifications.cancelScheduledNotificationAsync(REC_ID); } catch {}
+}
+
 const bearing = (a, b) => {
   const r = Math.PI / 180, dl = (b.longitude - a.longitude) * r;
   const y = Math.sin(dl) * Math.cos(b.latitude * r), x = Math.cos(a.latitude * r) * Math.sin(b.latitude * r) - Math.sin(a.latitude * r) * Math.cos(b.latitude * r) * Math.cos(dl);
@@ -262,12 +294,13 @@ async function snapRoute(route) {
   const k = Math.ceil(out.length / 3000);
   return out.length > 1 ? out.filter((_, i) => i % k === 0 || i === out.length - 1) : null;
 }
-Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
+Notifications.setNotificationHandler({ handleNotification: async (n) => { const rec = !!(n && n.request && n.request.content && n.request.content.data && n.request.content.data.rec); return { shouldShowBanner: !rec, shouldShowList: true, shouldPlaySound: !rec, shouldSetBadge: false }; } });
 TaskManager.defineTask(TASK, async ({ data, error }) => {
   if (error || !data?.locations) return;
   // Uygulama yeniden başlamışsa kayıtlı sürüşe devam et; kayıtlı sürüş yoksa takibi durdur (hayalet kayıt olmasın)
-  if (!driving && !(await reviveDrive())) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} return; }
+  if (!driving && !(await reviveDrive())) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} hideRecNotice(); return; }
   data.locations.forEach(processLoc);
+  ensureRecNotice();
 });
 async function fetchLatest() {
   if (!GH_REPO) return null;
@@ -1189,29 +1222,139 @@ function LeafletMap({ route, cells, grid, sat, people, cmd, onTick, onPerson, me
   );
 }
 
-function PhotosView({ regions, cur, pickPhoto, delPhoto }) {
-  const [view, setView] = useState(null);
-  const list = Object.entries(regions).map(([k, r]) => ({ k, name: r.name, photos: r.photos || (r.photo ? [r.photo] : []) }))
-    .filter((r) => r.photos.length || r.k === cur?.key).sort((a, b) => (b.k === cur?.key) - (a.k === cur?.key));
-  const ask = (k, u) => AlertX.alert('Fotoğraf silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => delPhoto(k, u) }]);
-  const vp = view ? (list.find((x) => x.k === view.k) || { photos: [] }).photos : [];
+// ---- Bölge fotoğrafları ve videoları ----
+const regionMedia = (r) => ({ photos: r.photos || (r.photo ? [r.photo] : []), videos: r.videos || [] });
+// Keşfedilen yerleri ile (il) göre gruplar. Güncel konumun ili ve yeni keşfedilenler üstte.
+function placeGroups(regions, curKey) {
+  const groups = new Map();
+  Object.entries(regions || {}).forEach(([k, r]) => {
+    if (!r || !r.name) return;
+    const [iso, il] = k.split('|'), g = groups.get(il || '') || { il: il || '', iso: iso || '', at: 0, items: [] };
+    g.at = Math.max(g.at, r.at || 0);
+    g.items.push({ k, name: r.name, il: il || '', at: r.at || 0, ...regionMedia(r) });
+    groups.set(il || '', g);
+  });
+  const curIl = curKey ? curKey.split('|')[1] || '' : null;
+  const list = [...groups.values()].sort((a, b) => (b.il === curIl) - (a.il === curIl) || b.at - a.at || a.il.localeCompare(b.il, 'tr'));
+  list.forEach((g) => g.items.sort((a, b) => (b.k === curKey) - (a.k === curKey) || b.at - a.at || a.name.localeCompare(b.name, 'tr')));
+  return list;
+}
+const placeLabel = (k) => { if (!k) return ''; const [, il, nm] = k.split('|'); return !nm || nm === il ? `${il || nm || ''} (il geneli)` : `${nm}${il ? ', ' + il : ''}`; };
+const mediaCount = (r) => { const m = regionMedia(r || {}); return m.photos.length + m.videos.length; };
+
+function VideoViewer({ uri, onClose, onDelete }) {
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center' }}>
+        <Video source={{ uri }} style={{ width: '100%', height: '80%' }} useNativeControls resizeMode={ResizeMode.CONTAIN} shouldPlay />
+        <View style={s.pvTop}>
+          <View />
+          <View style={{ flexDirection: 'row', gap: 22 }}>
+            <TouchableOpacity onPress={() => onDelete(uri)}><Ionicons name="trash-outline" size={26} color="#fff" /></TouchableOpacity>
+            <TouchableOpacity onPress={onClose}><Ionicons name="close" size={30} color="#fff" /></TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// "Nereye ekleyeceksin?": yer seç (il geneli ya da ilçe/bölge), altından fotoğraf ya da video ekle
+function MediaAddSheet({ regions, cur, recent, initKey, onPick, onClose }) {
+  const kb = useKbd(), [q, setQ] = useState(''), [sel, setSel] = useState(initKey || null);
+  const tr = (x) => String(x || '').toLocaleLowerCase('tr'), nq = tr(q.trim());
+  const groups = placeGroups(regions, null).sort((a, b) => a.il.localeCompare(b.il, 'tr'))
+    .map((g) => ({ ...g, ds: g.items.filter((d) => d.name !== g.il && (!nq || tr(d.name).includes(nq) || tr(g.il).includes(nq))).sort((a, b) => a.name.localeCompare(b.name, 'tr')) }))
+    .filter((g) => !nq || tr(g.il).includes(nq) || g.ds.length);
+  const ilKey = (g) => `${g.iso}|${g.il}|${g.il}`;
+  const top = [...new Set([...(recent || []), ...(cur ? [cur.key] : [])])].filter((k) => regions[k]);
+  const nm = (k) => (regions[k] && regions[k].name) || (k ? k.split('|')[2] : '') || '';
+  const Row = ({ k, text, indent }) => {
+    const n = mediaCount(regions[k]);
+    return (
+      <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 11, paddingLeft: indent ? 28 : 0 }} onPress={() => setSel(k)}>
+        <Ionicons name={sel === k ? 'radio-button-on' : 'radio-button-off'} size={22} color={sel === k ? C.accent : C.dim} />
+        <View style={{ flex: 1 }}><Text style={[s.itemTitle, !indent && { fontWeight: '800' }]}>{text}</Text>{n > 0 && <Text style={s.itemSub}>{n} fotoğraf/video</Text>}</View>
+      </TouchableOpacity>
+    );
+  };
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#0009', justifyContent: 'flex-end', paddingBottom: kb }}>
+        <View style={{ backgroundColor: C.bg, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, height: '85%' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={s.sec}>Nereye ekleyeceksin?</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={26} color={C.text} /></TouchableOpacity></View>
+          <TextInput style={[s.input, { marginTop: 0, padding: 12 }]} value={q} onChangeText={setQ} placeholder="il ya da ilçe ara" placeholderTextColor={C.dim} />
+          <ScrollView style={{ flex: 1, marginTop: 8 }} keyboardShouldPersistTaps="handled">
+            {Object.keys(regions).length === 0 && <Text style={s.hint}>Henüz keşfedilmiş bölge yok. Sürüş yaptıkça ya da haritada gezindikçe bölgeler eklenir.</Text>}
+            {top.length > 0 && !nq && (
+              <View style={{ marginBottom: 6 }}>
+                <Text style={[s.itemSub, { marginTop: 8 }]}>Yeni keşfedilen / şu anki bölge</Text>
+                {top.map((k) => <Row key={'t' + k} k={k} text={placeLabel(k)} />)}
+              </View>
+            )}
+            {groups.map((g) => (
+              <View key={g.il} style={{ marginTop: 6 }}>
+                {g.il ? <Row k={ilKey(g)} text={g.il} /> : <Text style={[s.itemSub, { marginTop: 8 }]}>Diğer</Text>}
+                {g.ds.map((d) => <Row key={d.k} k={d.k} text={d.name} indent />)}
+              </View>
+            ))}
+          </ScrollView>
+          <Text style={[s.itemSub, { marginTop: 8 }]}>{sel ? `Seçili: ${placeLabel(sel)}` : 'Önce bir yer seç'}</Text>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 8 }, !sel && { opacity: 0.4 }]} disabled={!sel} onPress={() => onPick(sel, 'photo', nm(sel))}><Text style={s.btnText}>Fotoğraf ekle</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 8, backgroundColor: C.card }, !sel && { opacity: 0.4 }]} disabled={!sel} onPress={() => onPick(sel, 'video', nm(sel))}><Text style={[s.btnText, { color: C.accent }]}>Video ekle</Text></TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function PhotosView({ regions, cur, openAdd, delMedia }) {
+  const [view, setView] = useState(null), [vid, setVid] = useState(null);
+  const groups = placeGroups(regions, cur && cur.key), all = groups.flatMap((g) => g.items);
+  const ask = (k, u) => AlertX.alert('Silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => delMedia(k, u) }]);
+  const vp = view ? (all.find((x) => x.k === view.k) || { photos: [] }).photos : [];
   return (
     <ScrollView style={[StyleSheet.absoluteFill, { backgroundColor: C.bg }]} contentContainerStyle={{ padding: 20, paddingTop: 70, paddingBottom: 120 }}>
-      {list.length === 0 && <Text style={s.hint}>Haritada gezindikçe bölgeler burada görünür.</Text>}
-      {list.map((r) => (
-        <View key={r.k} style={{ marginBottom: 22 }}>
-          <Text style={s.sec}>{r.name}</Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-            {r.photos.map((u, i) => (
-              <TouchableOpacity key={u} style={s.gph} onPress={() => setView({ k: r.k, i })} onLongPress={() => ask(r.k, u)}>
-                <Image source={{ uri: u }} style={{ width: '100%', height: '100%', borderRadius: 16 }} />
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity style={[s.gph, { alignItems: 'center', justifyContent: 'center', backgroundColor: C.card, borderRadius: 16 }]} onPress={() => pickPhoto(r.k)}><Ionicons name="add" size={32} color={C.accent} /></TouchableOpacity>
-          </View>
+      <TouchableOpacity style={[s.btn, { marginTop: 0, flexDirection: 'row', justifyContent: 'center', gap: 8 }]} onPress={() => openAdd(cur ? cur.key : null)}><Ionicons name="add" size={22} color="#06101F" /><Text style={s.btnText}>Fotoğraf / video ekle</Text></TouchableOpacity>
+      {all.length === 0 && <Text style={s.hint}>Haritada gezindikçe bölgeler burada görünür.</Text>}
+      {groups.map((g) => (
+        <View key={g.il} style={{ marginTop: 18 }}>
+          <Text style={[s.sec, { marginTop: 0 }]}>{g.il || 'Diğer'}</Text>
+          {g.items.map((r) => {
+            const title = r.il && r.name === r.il ? `${r.name} (il geneli)` : r.name;
+            if (!r.photos.length && !r.videos.length) {
+              return (
+                <View key={r.k} style={[s.item, { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 }]}>
+                  <View style={{ flex: 1 }}><Text style={s.itemTitle}>{title}</Text><Text style={s.itemSub}>Henüz fotoğraf ya da video yok</Text></View>
+                  <TouchableOpacity onPress={() => openAdd(r.k)} style={{ padding: 6 }}><Ionicons name="add-circle" size={28} color={C.accent} /></TouchableOpacity>
+                </View>
+              );
+            }
+            return (
+              <View key={r.k} style={{ marginBottom: 18 }}>
+                <Text style={[s.itemTitle, { marginBottom: 8 }]}>{title}</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  {r.photos.map((u, i) => (
+                    <TouchableOpacity key={u} style={s.gph} onPress={() => setView({ k: r.k, i })} onLongPress={() => ask(r.k, u)}>
+                      <Image source={{ uri: u }} style={{ width: '100%', height: '100%', borderRadius: 16 }} />
+                    </TouchableOpacity>
+                  ))}
+                  {r.videos.map((u) => (
+                    <TouchableOpacity key={u} style={[s.gph, { backgroundColor: '#000', borderRadius: 16, alignItems: 'center', justifyContent: 'center' }]} onPress={() => setVid({ k: r.k, u })} onLongPress={() => ask(r.k, u)}>
+                      <Ionicons name="play-circle" size={40} color="#fff" /><Text style={{ position: 'absolute', left: 8, bottom: 6, color: '#fff', fontSize: 11, fontWeight: '700' }}>VİDEO</Text>
+                    </TouchableOpacity>
+                  ))}
+                  <TouchableOpacity style={[s.gph, { alignItems: 'center', justifyContent: 'center', backgroundColor: C.card, borderRadius: 16 }]} onPress={() => openAdd(r.k)}><Ionicons name="add" size={32} color={C.accent} /></TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
         </View>
       ))}
       {view && <PhotoViewer photos={vp} start={view.i} onClose={() => setView(null)} onDelete={(u) => ask(view.k, u)} />}
+      {vid && <VideoViewer uri={vid.u} onClose={() => setVid(null)} onDelete={(u) => { setVid(null); ask(vid.k, u); }} />}
     </ScrollView>
   );
 }
@@ -1232,7 +1375,7 @@ const inScope = (p, my, scope, me) => {
   if (!p.loc || !p.loc.c || !my || !my.c) return d <= 25;
   return scope === 'ilce' ? (!!p.loc.d && p.loc.d === my.d) || d <= 3 : p.loc.c === my.c || d <= 25;
 };
-function MapTab({ route, cells, on, region, regions, name, profile, totalKm, prefs, setPrefs, pickPhoto, delPhoto, onPan }) {
+function MapTab({ route, cells, on, region, regions, name, profile, totalKm, prefs, setPrefs, openAdd, delMedia, onPan }) {
   const [me, setMe] = useState(null);
   const [seen, setSeen] = useState(false);
   const [mode, setMode] = useState('cells');
@@ -1291,7 +1434,7 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
   return (
     <View style={s.map}>
       <LeafletMap style={s.map} route={mode === 'cells' && on ? route : EMPTY} cells={mode === 'cells' ? cells : EMPTY} me={me} follow={on || !seen} grid={mode === 'cells'} sat={sat} people={mode === 'stories' ? people : EMPTY} onPerson={setPerson} />
-      {mode === 'photos' && <PhotosView regions={regions} cur={region} pickPhoto={pickPhoto} delPhoto={delPhoto} />}
+      {mode === 'photos' && <PhotosView regions={regions} cur={region} openAdd={openAdd} delMedia={delMedia} />}
       <View style={s.seg}>
         {[['cells', 'Bölgelerim'], ['photos', 'Fotoğraflarım'], ['stories', 'Hikayeler']].map(([k, l]) => (
           <TouchableOpacity key={k} style={[s.segBtn, mode === k && s.segActive]} onPress={() => setMode(k)}>
@@ -1323,11 +1466,11 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
       {composer && <StoryComposer me={profile} pos={me} onClose={() => setComposer(false)} />}
       {mode !== 'photos' && <TouchableOpacity style={s.satBtn} onPress={() => setSat(!sat)}><Ionicons name={sat ? 'map' : 'earth'} size={22} color={C.text} /></TouchableOpacity>}
       {region && mode !== 'photos' && mode !== 'stories' && (
-        <TouchableOpacity style={s.chip} onPress={() => pickPhoto(region.key)}>
+        <TouchableOpacity style={s.chip} onPress={() => openAdd(region.key)}>
           {region.photo ? <Image source={{ uri: region.photo }} style={s.thumb} /> : <View style={s.thumb} />}
           <View style={{ flex: 1 }}>
             <Text style={s.itemTitle}>{region.name}</Text>
-            <Text style={s.itemSub}>Fotoğraf ekle</Text>
+            <Text style={s.itemSub}>Fotoğraf / video ekle</Text>
           </View>
         </TouchableOpacity>
       )}
@@ -3240,7 +3383,7 @@ function AppInner({ ready }) {
   const [trips, setTrips] = useState([]);
   const [regions, setRegions] = useState({});
   const [cur, setCur] = useState(null);
-  const [ask, setAsk] = useState(null);
+  const [ask, setAsk] = useState(null), [addMedia, setAddMedia] = useState(null);
   const [on, setOn] = useState(false);
   const [live, setLive] = useState({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
   const [route, setRoute] = useState([]);
@@ -3277,33 +3420,36 @@ function AppInner({ ready }) {
       const known = regionsRef.current[key];
       setCur({ key, name, photo: known?.photo });
       if (!known?.seen) {
-        saveRegions({ ...regionsRef.current, [key]: { ...known, name, seen: true } });
-        if (onRef.current) pending.current = { key, name }; else setAsk({ key, name });
+        saveRegions({ ...regionsRef.current, [key]: { ...known, name, seen: true, at: Date.now() } });
+        if (onRef.current) pending.current = [...(pending.current || []), { key, name }]; else setAsk({ list: [{ key, name }] });
       }
     } catch {}
   };
 
-  const pickPhoto = async (key) => {
+  const pickMedia = async (key, kind, nm) => {
     setAsk(null);
+    const vid = kind === 'video';
     try {
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, allowsMultipleSelection: true, selectionLimit: 10 });
+      const res = await ImagePicker.launchImageLibraryAsync(vid ? { mediaTypes: ['videos'], allowsMultipleSelection: true, selectionLimit: 3 } : { mediaTypes: ['images'], quality: 0.7, allowsMultipleSelection: true, selectionLimit: 10 });
       if (res.canceled) return;
       const added = [];
       for (const a of res.assets) {
-        const to = FileSystem.documentDirectory + `reg_${Date.now()}_${added.length}.jpg`;
+        const m = /\.([a-z0-9]{2,4})(\?|$)/i.exec(String(a.uri)), ext = vid ? (m ? m[1].toLowerCase() : 'mp4') : 'jpg';
+        const to = FileSystem.documentDirectory + `reg_${Date.now()}_${added.length}.${ext}`;
         await FileSystem.copyAsync({ from: a.uri, to });
         added.push(to);
       }
-      const old = regionsRef.current[key] || {};
-      const photos = [...(old.photos || (old.photo ? [old.photo] : [])), ...added];
-      saveRegions({ ...regionsRef.current, [key]: { ...old, photos, photo: photos[0] } });
-      setCur((c) => (c && c.key === key ? { ...c, photo: photos[0] } : c));
-    } catch { AlertX.alert('Fotoğraf eklenemedi', 'Galeri iznini kontrol et.'); }
+      const old = regionsRef.current[key] || {}, photos = old.photos || (old.photo ? [old.photo] : []);
+      const next = vid ? { ...old, videos: [...(old.videos || []), ...added] } : { ...old, photos: [...photos, ...added], photo: [...photos, ...added][0] };
+      saveRegions({ ...regionsRef.current, [key]: { ...next, name: old.name || nm || key.split('|')[2] || '', seen: true } });
+      if (!vid) setCur((c) => (c && c.key === key ? { ...c, photo: next.photo } : c));
+    } catch { AlertX.alert(vid ? 'Video eklenemedi' : 'Fotoğraf eklenemedi', 'Galeri iznini kontrol et. Video çok büyükse yeterli yer olmayabilir.'); }
   };
-  const delPhoto = (key, uri) => {
-    const old = regionsRef.current[key], photos = (old.photos || []).filter((p) => p !== uri);
-    saveRegions({ ...regionsRef.current, [key]: { ...old, photos, photo: photos[0] } });
+  const delMedia = (key, uri) => {
+    const old = regionsRef.current[key] || {}, photos = (old.photos || []).filter((p) => p !== uri), videos = (old.videos || []).filter((v) => v !== uri);
+    saveRegions({ ...regionsRef.current, [key]: { ...old, photos, videos, photo: photos[0] } });
     setCur((c) => (c && c.key === key ? { ...c, photo: photos[0] } : c));
+    FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
   };
 
   // Sürüşü kaydeder (normal bitiş ya da yarıda kalan sürüş). base: o an kayıtlı sürüş listesi
@@ -3321,9 +3467,10 @@ function AppInner({ ready }) {
     vidRef.current = R.veh || 'v0'; onRef.current = true; setOn(true);
     setLive({ speed: R.last ? R.last.v * 3.6 : 0, dist: R.dist, max: R.max, g: R.maxG, secs: (Date.now() - R.t0) / 1000 });
     setRoute(R.route.slice());
+    ensureRecNotice(true);
   };
   const finishInterrupted = (d, list) => {
-    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {});
+    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {}); hideRecNotice();
     if (d.dist < 0.05 || list.some((x) => x.id === String(d.t0))) return; // çok kısa ya da zaten kayıtlı
     finishTrip(d, list, true);
     AlertX.alert('Yarım kalan sürüşün kaydedildi', `${d.dist.toFixed(1)} km. Uygulama sürüş sırasında kapanmış ya da konum takibi durmuş. Kayıt kesildiği ana kadar saklandı. Sık yaşanıyorsa Ayarlar → Bildirimler bölümünden pil kısıtlamasını ve otomatik başlatma iznini aç.`);
@@ -3333,7 +3480,7 @@ function AppInner({ ready }) {
     try { running = await Location.hasStartedLocationUpdatesAsync(TASK); } catch {}
     if (driving) { if (running || watchSub) reflectDrive(); else finishInterrupted(R, list); return; }
     const snap = await loadSnap();
-    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } return; }
+    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } hideRecNotice(); return; }
     if (running) { R = snap; driving = true; reflectDrive(); } else finishInterrupted(snap, list);
   };
 
@@ -3354,13 +3501,14 @@ function AppInner({ ready }) {
     setRoute([]);
     const opts = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 };
     try {
-      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Sürüşün kaydediliyor', killServiceOnDestroy: false } });
+      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Konum takibi açık', killServiceOnDestroy: false } });
     } catch {
       // Arka plan takibi başlamadıysa ön plan takibine düş ve kullanıcıyı uyar
       try { watchSub = await Location.watchPositionAsync(opts, processLoc); } catch { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return AlertX.alert('Konum alınamadı', 'Konum servisini ve iznini kontrol edip tekrar dene.'); }
       AlertX.alert('Arka plan takibi başlatılamadı', 'Sürüş sadece uygulama açıkken ve ekran açıkken kaydedilir. Konum iznini "Her zaman izin ver" yapmayı dene.');
     }
     onRef.current = true; setOn(true);
+    showRecNotice(true);
   };
 
   const stop = async () => {
@@ -3369,8 +3517,10 @@ function AppInner({ ready }) {
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
     if (watchSub) { watchSub.remove(); watchSub = null; }
     AsyncStorage.removeItem(DKEY).catch(() => {});
+    hideRecNotice();
     onRef.current = false; setOn(false);
-    if (pending.current) { setAsk(pending.current); pending.current = null; }
+    if (pending.current && pending.current.length) setAsk({ list: pending.current });
+    pending.current = null;
     if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const t = finishTrip(d, trips, false);
     setTab('profile');
@@ -3601,7 +3751,7 @@ function AppInner({ ready }) {
         </View>
         <View style={{ flex: 1 }}>
           {tab === 'drive' && <Drive on={on} live={live} onStart={start} onStop={stop} />}
-          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} pickPhoto={pickPhoto} delPhoto={delPhoto} onPan={(la, lo) => checkRef.current(la, lo)} />}
+          {tab === 'map' && <MapTab route={route} cells={cells} on={on} region={cur} regions={regions} name={profile.username} totalKm={allKm} prefs={prefs} setPrefs={setPrefs} profile={profile} openAdd={(k) => setAddMedia({ key: k })} delMedia={delMedia} onPan={(la, lo) => checkRef.current(la, lo)} />}
           {tab === 'board' && <Board me={profile} friends={social.friends} />}
           {tab === 'vehicle' && <VehicleTab me={profile} docs={docsBy[activeV] || {}} setDocs={(d) => setDocsBy((p) => ({ ...p, [activeV]: d }))} rem={rem} setRem={setRem} garage={{ vehicles, vid: activeV }} onSelect={selectVehicle} onAdd={addVehicle} onEdit={editVehicle} onRemove={removeVehicle} stats={{ km: totals(vTrips).dist, n: vTrips.length }} />}
           {tab === 'profile' && <Profile me={profile} launches={launches.filter((r) => (r.veh || 'v0') === activeV)} trips={vTrips} terr={cellStore.length} onUpdate={updateTrip} onAvatar={pickAvatar} onDelete={del} />}
@@ -3649,12 +3799,13 @@ function AppInner({ ready }) {
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
         {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
+        {addMedia && <MediaAddSheet regions={regions} cur={cur} recent={addMedia.recent || []} initKey={addMedia.key} onPick={(key, kind, nm) => { setAddMedia(null); pickMedia(key, kind, nm); }} onClose={() => setAddMedia(null)} />}
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
             <View style={s.modal}>
-              <Text style={s.h1}>{ask?.name}</Text>
-              <Text style={[s.itemSub, { marginBottom: 18 }]}>Yeni bir bölgeye girdin. İstersen bu bölge için bir fotoğraf seçebilirsin. Zorunlu değil.</Text>
-              <TouchableOpacity style={s.btn} onPress={() => pickPhoto(ask.key)}><Text style={s.btnText}>Fotoğraf ekle</Text></TouchableOpacity>
+              <Text style={s.h1}>{ask && ask.list.length > 1 ? `${ask.list.length} yeni bölge keşfettin` : ask && ask.list[0].name}</Text>
+              <Text style={[s.itemSub, { marginBottom: 18 }]}>{ask && ask.list.length > 1 ? `${ask.list.map((x) => x.name).join(', ')}. İstersen bu yerlere fotoğraf ya da video ekleyebilirsin. Zorunlu değil.` : 'Yeni bir bölgeye girdin. İstersen bu bölge için fotoğraf ya da video ekleyebilirsin. Zorunlu değil.'}</Text>
+              <TouchableOpacity style={s.btn} onPress={() => { const l = ask.list; setAsk(null); setAddMedia({ key: l[0].key, recent: l.map((x) => x.key) }); }}><Text style={s.btnText}>Fotoğraf / video ekle</Text></TouchableOpacity>
               <TouchableOpacity style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={() => setAsk(null)}><Text style={[s.btnText, { color: C.text }]}>Şimdi değil</Text></TouchableOpacity>
             </View>
           </View>
