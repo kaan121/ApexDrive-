@@ -195,6 +195,84 @@ async function hideRecNotice() {
   try { await Notifications.cancelScheduledNotificationAsync(REC_ID); } catch {}
 }
 
+// ---- Otomatik sürüş kaydı: telefon yaklaşık 500 m hareket edip 15 km/s'i geçince sürüş kendiliğinden başlar ----
+// Sürüş yokken düşük güçlü konum izleme çalışır (kalıcı bildirimle). Eşik aşılınca, hareketin başladığı yerden itibaren
+// toplanan yol da sürüşe katılır ve takip yüksek doğruluğa geçer. Ayar kapalıysa bu kod hiç çalışmaz.
+const AKEY = '@apexdrive_auto';
+const AUTO_KM = 0.5, AUTO_SPEED = 15;
+let autoCfg = null, autoCfgAt = 0, AS = { anchor: null, last: null, cand: null }, onAutoStart = null;
+const autoReset = () => { AS = { anchor: null, last: null, cand: null }; };
+async function loadAuto(force) {
+  if (!force && autoCfg && Date.now() - autoCfgAt < 30000) return autoCfg;
+  try { const v = await AsyncStorage.getItem(AKEY); autoCfg = v ? JSON.parse(v) : { on: false, veh: 'v0' }; } catch { autoCfg = autoCfg || { on: false, veh: 'v0' }; }
+  autoCfgAt = Date.now();
+  return autoCfg;
+}
+function saveAuto(cfg) { autoCfg = cfg; autoCfgAt = Date.now(); AsyncStorage.setItem(AKEY, JSON.stringify(cfg)).catch(() => {}); }
+const IDLE_OPTS = { accuracy: Location.Accuracy.Balanced, timeInterval: 5000, distanceInterval: 25, showsBackgroundLocationIndicator: false, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Otomatik sürüş algılama açık', killServiceOnDestroy: false } };
+const REC_OPTS = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Konum takibi açık', killServiceOnDestroy: false } };
+// Bir konum noktasını işler. Sürüş başlamalıysa true döner; başlangıçtan beri yol st.cand.pts içindedir.
+function autoFeed(st, loc) {
+  const c = loc.coords, t = loc.timestamp;
+  if (!c || c.accuracy > 100) return false;
+  const p = { latitude: c.latitude, longitude: c.longitude, t, v: c.speed != null && c.speed >= 0 ? c.speed * 3.6 : null };
+  if (!st.anchor) { st.anchor = p; st.last = p; return false; }
+  const prev = st.last, dt = (t - prev.t) / 1000;
+  if (dt <= 0) return false;
+  const step = hav(prev, p) * 1000;
+  if (step / dt > 70) return false; // 250 km/s üstü sıçrama: GPS hatası
+  if (p.v == null) p.v = (step / dt) * 3.6;
+  st.last = p;
+  if (!st.cand) {
+    const away = hav(st.anchor, p) * 1000;
+    if (away >= 100 || (p.v >= 7 && away >= 40)) st.cand = { pts: [st.anchor], dist: 0, fast: 0, slow: 0, t0: t };
+    else { if (p.v < 3) st.anchor = p; return false; } // duruyorsa başlangıç noktasını bulunduğu yere taşı
+  }
+  const cd = st.cand, seg = hav(cd.pts[cd.pts.length - 1], p);
+  if (seg * 1000 >= 5 || p.v >= 3) cd.dist += seg; // konum titreşimini sayma
+  cd.pts.push(p);
+  cd.fast = p.v >= AUTO_SPEED ? cd.fast + 1 : 0;
+  if (p.v < 4) { if (!cd.slow) cd.slow = t; else if (t - cd.slow > 90000) { st.anchor = p; st.cand = null; return false; } } else cd.slow = 0; // 90 sn'den uzun durma: yürüyüş/bekleme, vazgeç
+  if (t - cd.t0 > 8 * 60000 || cd.pts.length > 600) { st.anchor = p; st.cand = null; return false; }
+  return cd.dist >= AUTO_KM && hav(st.anchor, p) >= AUTO_KM * 0.8 && cd.fast >= 2;
+}
+async function switchToRecording() {
+  try { await Location.startLocationUpdatesAsync(TASK, REC_OPTS); }
+  catch { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} await Location.startLocationUpdatesAsync(TASK, REC_OPTS); }
+}
+async function beginAutoDrive(pts) {
+  if (driving) return;
+  const cfg = await loadAuto(), d = fresh(cfg.veh || 'v0');
+  let dist = 0, moveMs = 0, mx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const seg = hav(pts[i - 1], pts[i]), dt = pts[i].t - pts[i - 1].t;
+    if (seg >= 0.003) { dist += seg; if (dt > 0 && dt < 60000) moveMs += dt; }
+    if (pts[i].v < 250) mx = Math.max(mx, pts[i].v);
+  }
+  d.t0 = pts[0].t; d.auto = true; d.moved = true; d.dist = dist; d.movingMs = moveMs; d.max = mx;
+  d.route = pts.map((p) => ({ latitude: p.latitude, longitude: p.longitude, v: Math.round(p.v || 0) }));
+  R = d; driving = true; endedT0 = 0; lastSave = 0;
+  persistDrive(true);
+  try { await switchToRecording(); }
+  catch { driving = false; R = fresh(); AsyncStorage.removeItem(DKEY).catch(() => {}); autoReset(); return; }
+  showRecNotice(false);
+  onAutoStart && onAutoStart();
+}
+async function startAutoMonitor() {
+  try {
+    if (driving || Platform.OS !== 'android') return;
+    if (!(await loadAuto(true)).on) return;
+    const bg = await Location.getBackgroundPermissionsAsync();
+    if (bg.status !== 'granted') return;
+    if (await Location.hasStartedLocationUpdatesAsync(TASK)) return;
+    autoReset();
+    await Location.startLocationUpdatesAsync(TASK, IDLE_OPTS);
+  } catch {}
+}
+async function stopAutoMonitor() {
+  try { if (!driving && (await Location.hasStartedLocationUpdatesAsync(TASK))) await Location.stopLocationUpdatesAsync(TASK); } catch {}
+}
+
 const bearing = (a, b) => {
   const r = Math.PI / 180, dl = (b.longitude - a.longitude) * r;
   const y = Math.sin(dl) * Math.cos(b.latitude * r), x = Math.cos(a.latitude * r) * Math.sin(b.latitude * r) - Math.sin(a.latitude * r) * Math.cos(b.latitude * r) * Math.cos(dl);
@@ -298,7 +376,13 @@ Notifications.setNotificationHandler({ handleNotification: async (n) => { const 
 TaskManager.defineTask(TASK, async ({ data, error }) => {
   if (error || !data?.locations) return;
   // Uygulama yeniden başlamışsa kayıtlı sürüşe devam et; kayıtlı sürüş yoksa takibi durdur (hayalet kayıt olmasın)
-  if (!driving && !(await reviveDrive())) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} hideRecNotice(); return; }
+  if (!driving && !(await reviveDrive())) {
+    if ((await loadAuto()).on) { // otomatik algılama açık: sürüş başlayıp başlamadığına bak
+      for (const l of data.locations) if (autoFeed(AS, l)) { const pts = AS.cand.pts; autoReset(); await beginAutoDrive(pts); break; }
+      return;
+    }
+    try { await Location.stopLocationUpdatesAsync(TASK); } catch {} hideRecNotice(); return;
+  }
   data.locations.forEach(processLoc);
   ensureRecNotice();
 });
@@ -2997,7 +3081,7 @@ const SET_CATS = [
   ['server', 'server-outline', 'Sunucu', 'Bağlantı testi'],
   ['update', 'cloud-download-outline', 'Güncelleme', 'Sürüm ve güncelleme kontrolü'],
 ];
-function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, onSignOut, onDeleteAccount }) {
+function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, onSignOut, onDeleteAccount, onAuto }) {
   const [cat, setCat] = useState(autoCheck ? 'update' : null);
   const [st, setSt] = useState('idle');
   const [rel, setRel] = useState(null);
@@ -3052,7 +3136,12 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
       <Box title="Tema" sub="Uygulamanın renk düzeni."><Chips opts={[['Sistem', 'system'], ['Karanlık', 'dark'], ['Aydınlık', 'light']]} val={prefs.theme} onPick={(v) => setPrefs({ ...prefs, theme: v })} /></Box>
     ),
     drive: (
+      <>
+      <Box title="Otomatik sürüş kaydı" sub={`Telefon yaklaşık 500 m hareket edip 15 km/s'i geçince sürüş kaydı kendiliğinden başlar. Uygulama kapalıyken de çalışır, bitirmeyi sen yaparsın. Pil kullanımını artırır ve konum izninin "Her zaman izin ver" olmasını ister. Bisiklet gibi araçlar da başlatabilir.`}>
+        <Chips opts={[['Kapalı', false], ['Açık', true]]} val={!!prefs.auto} onPick={(v) => onAuto(v)} />
+      </Box>
       <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
+      </>
     ),
     privacy: (
       <>
@@ -3362,7 +3451,7 @@ function AppInner({ ready }) {
     if (!online) { setAcct('in'); setLink('ok'); return; }
     restore().then((u) => setAcct(u ? 'in' : 'out')).catch(() => setAcct('out'));
   }, []);
-  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1, scope: 'il' });
+  const [prefs, setPrefs] = useState({ theme: 'system', keepDays: 14, visible: false, daily: 1, scope: 'il', auto: false });
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
@@ -3397,12 +3486,13 @@ function AppInner({ ready }) {
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
     AsyncStorage.getItem(RKEY).then((v) => { if (v) { regionsRef.current = JSON.parse(v); setRegions(regionsRef.current); } }).catch(() => {});
     Location.requestForegroundPermissionsAsync().catch(() => {});
+    onAutoStart = () => reflectDrive();
     onTick = () => {
       setLive({ speed: R.last.v * 3.6, dist: R.dist, max: R.max, g: R.maxG, secs: (Date.now() - R.t0) / 1000 });
       setRoute(R.route.slice());
       checkRef.current(R.last.c.latitude, R.last.c.longitude);
     };
-    return () => { onTick = null; };
+    return () => { onTick = null; onAutoStart = null; };
   }, []);
 
   const saveRegions = (n) => { regionsRef.current = n; setRegions(n); AsyncStorage.setItem(RKEY, JSON.stringify(n)).catch(() => {}); };
@@ -3456,7 +3546,7 @@ function AppInner({ ready }) {
   const finishTrip = (d, base, interrupted) => {
     finishCurve(d);
     const duration = ((interrupted ? d.savedAt || Date.now() : Date.now()) - d.t0) / 1000, mov = d.movingMs / 3600000;
-    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: d.veh || 'v0' };
+    const t = { id: String(d.t0), start: d.t0, duration, dist: d.dist, max: d.max, avg: mov > 0 ? Math.min(d.dist / mov, d.max) : 0, acc: d.acc, brake: d.brake, corner: d.corner, stops: d.stops, maxG: d.maxG, route: d.route, left: d.left, right: d.right, turnsV: 2, maxDec: d.maxDec, maxAcc: d.maxAcc, still: Math.max(0, duration - d.movingMs / 1000), veh: d.veh || 'v0', auto: !!d.auto };
     t.score = driveScore(t); t.scoreV = 2;
     const n = [t, ...base];
     setTrips(n); persistTrips(n);
@@ -3470,7 +3560,7 @@ function AppInner({ ready }) {
     ensureRecNotice(true);
   };
   const finishInterrupted = (d, list) => {
-    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {}); hideRecNotice();
+    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {}); hideRecNotice(); startAutoMonitor();
     if (d.dist < 0.05 || list.some((x) => x.id === String(d.t0))) return; // çok kısa ya da zaten kayıtlı
     finishTrip(d, list, true);
     AlertX.alert('Yarım kalan sürüşün kaydedildi', `${d.dist.toFixed(1)} km. Uygulama sürüş sırasında kapanmış ya da konum takibi durmuş. Kayıt kesildiği ana kadar saklandı. Sık yaşanıyorsa Ayarlar → Bildirimler bölümünden pil kısıtlamasını ve otomatik başlatma iznini aç.`);
@@ -3480,7 +3570,7 @@ function AppInner({ ready }) {
     try { running = await Location.hasStartedLocationUpdatesAsync(TASK); } catch {}
     if (driving) { if (running || watchSub) reflectDrive(); else finishInterrupted(R, list); return; }
     const snap = await loadSnap();
-    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } hideRecNotice(); return; }
+    if (!snap) { if (running && !(await loadAuto()).on) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } hideRecNotice(); return; }
     if (running) { R = snap; driving = true; reflectDrive(); } else finishInterrupted(snap, list);
   };
 
@@ -3495,13 +3585,13 @@ function AppInner({ ready }) {
       const go = await new Promise((res) => AlertX.alert('Arka planda kayıt kapalı', 'Konum izni "Her zaman izin ver" değil. Uygulamayı arka plana atarsan ya da ekran kapanırsa kayıt durabilir ve sürüş kaybolabilir.', [{ text: 'Ayarları aç', style: 'cancel', onPress: () => { Linking.openSettings(); res(false); } }, { text: 'Yine de başla', onPress: () => res(true) }]));
       if (!go) return;
     }
-    R = fresh(vidRef.current); driving = true; lastSave = 0; endedT0 = 0;
+    R = fresh(vidRef.current); driving = true; lastSave = 0; endedT0 = 0; autoReset();
     persistDrive(true);
     setLive({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
     setRoute([]);
     const opts = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 };
     try {
-      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Konum takibi açık', killServiceOnDestroy: false } });
+      await switchToRecording();
     } catch {
       // Arka plan takibi başlamadıysa ön plan takibine düş ve kullanıcıyı uyar
       try { watchSub = await Location.watchPositionAsync(opts, processLoc); } catch { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return AlertX.alert('Konum alınamadı', 'Konum servisini ve iznini kontrol edip tekrar dene.'); }
@@ -3517,7 +3607,7 @@ function AppInner({ ready }) {
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
     if (watchSub) { watchSub.remove(); watchSub = null; }
     AsyncStorage.removeItem(DKEY).catch(() => {});
-    hideRecNotice();
+    hideRecNotice(); autoReset(); startAutoMonitor();
     onRef.current = false; setOn(false);
     if (pending.current && pending.current.length) setAsk({ list: pending.current });
     pending.current = null;
@@ -3651,6 +3741,11 @@ function AppInner({ ready }) {
     return () => sub.remove();
   }, [acct, link, !!profile]);
   useEffect(() => {
+    if (!pReady) return;
+    saveAuto({ on: !!prefs.auto, veh: (profile && profile.vid) || 'v0' }); // arka plandaki görev bunu okur
+    if (prefs.auto && profile) startAutoMonitor(); else if (!prefs.auto) stopAutoMonitor();
+  }, [prefs.auto, pReady, profile && profile.vid, !!profile]);
+  useEffect(() => {
     AsyncStorage.getItem(VKEY).then((v) => { vLoaded.current = true; if (v) { const j = JSON.parse(v); setDocsBy(j.by || (j.docs ? { v0: j.docs } : {})); if (j.rem) setRem(j.rem); } }).catch(() => { vLoaded.current = true; });
   }, []);
   useEffect(() => {
@@ -3714,6 +3809,15 @@ function AppInner({ ready }) {
   if (!profile.car) return shell(<Welcome existing={profile} onDone={saveProfile} />);
   const activeV = (profile && profile.vid) || 'v0', vTrips = tripsOf(trips, activeV), allKm = totals(trips).dist + (on ? live.dist : 0);
   const doSignOut = () => AlertX.alert('Çıkış yapılsın mı?', 'Sürüş kayıtların bu telefonda kalır. Tekrar giriş yapınca hesabına bağlanırsın.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Çıkış yap', style: 'destructive', onPress: async () => { await unregisterPush(); await signOut(); setSettingsOpen(false); setAutoUpd(false); setLink('wait'); setAcct('out'); } }]);
+  const toggleAuto = async (v) => {
+    if (v) {
+      const fg = await Location.requestForegroundPermissionsAsync().catch(() => ({ status: 'denied' }));
+      if (fg.status === 'granted') await Location.requestBackgroundPermissionsAsync().catch(() => {});
+      const bg = await Location.getBackgroundPermissionsAsync().catch(() => ({ status: 'denied' }));
+      if (bg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Otomatik kayıt için konum izninin "Her zaman izin ver" olması gerekir. Telefon ayarlarından değiştirip tekrar dene.');
+    }
+    setPrefs({ ...prefs, auto: v });
+  };
   const runDelete = async () => {
     const fail = () => AlertX.alert('Hesap silinemedi', 'İnternetini kontrol edip tekrar dene. Sorun sürerse sunucuda hesap silme güncellemesi (SQL) eksik olabilir.');
     try {
@@ -3795,7 +3899,7 @@ function AppInner({ ready }) {
         {screen === 'monthly' && <MonthlyScreen trips={vTrips} name={profile.username} car={profile.car} onClose={() => setScreen(null)} />}
         {screen === 'care' && <CareScreen vehicle={profile.car} vid={activeV} driven={totals(vTrips).dist + (on ? live.dist : 0)} onClose={() => setScreen(null)} />}
         {shareTrip && <ShareSheet t={shareTrip} onClose={() => setShareTrip(null)} />}
-        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onDeleteAccount={doDeleteAccount} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
+        {settingsOpen && <SettingsModal prefs={prefs} setPrefs={setPrefs} autoCheck={autoUpd} username={profile.username} email={sess.user && sess.user.email} onSignOut={doSignOut} onDeleteAccount={doDeleteAccount} onAuto={toggleAuto} onClose={() => { setSettingsOpen(false); setAutoUpd(false); }} />}
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
         {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
