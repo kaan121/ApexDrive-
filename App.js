@@ -208,14 +208,16 @@ function buildTrip(d, interrupted) {
 }
 // Yerel modülün kaydettiği noktaları [zaman, enlem, boylam, hız, doğruluk, yön] canlı sürüşle aynı hesaptan geçirir
 function tripFromPoints(ps, veh) {
-  if (!ps || ps.length < 2) return null;
+  if (!ps || ps.length < 2) { ND.addLog(`iceri aktarildi: ${ps ? ps.length : 0} nokta, cok kisa -> elendi`).catch(() => {}); return null; } // TEŞHİS
   const prev = { R, onTick, lastSave }, d = fresh(veh);
   d.t0 = ps[0][0]; d.auto = true;
   R = d; driving = true; onTick = null; lastSave = Infinity; // hesap sırasında ekran güncellenmesin, diske yazılmasın
   try { ps.forEach((p) => processLoc({ timestamp: p[0], coords: { latitude: p[1], longitude: p[2], speed: p[3] >= 0 ? p[3] : null, accuracy: p[4], heading: p[5] >= 0 ? p[5] : -1 } })); }
   finally { driving = false; R = prev.R; onTick = prev.onTick; lastSave = prev.lastSave; }
   d.savedAt = ps[ps.length - 1][0];
-  return d.dist < 0.05 ? null : buildTrip(d, true);
+  const ok = d.dist >= 0.3 && d.max >= 20; // GPS kayması: yerinde dururken oluşan sahte sürüşler atılır
+  ND.addLog(`iceri aktarildi: ${ps.length} nokta, ${d.dist.toFixed(2)} km, en yuksek ${Math.round(d.max)} km/s -> ${ok ? 'eklendi' : 'elendi'}`).catch(() => {}); // TEŞHİS
+  return ok ? buildTrip(d, true) : null;
 }
 
 const bearing = (a, b) => {
@@ -3017,6 +3019,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
   const [rel, setRel] = useState(null);
   const [sv, setSv] = useState('');
   const [pp, setPp] = useState(null);
+  const [dlog, setDlog] = useState(null); // TEŞHİS
   useEffect(() => { if (cat === 'notif' && online) rpc('push_prefs_get').then((j) => setPp(Array.isArray(j) && j[0] ? j[0] : 'err')); }, [cat]);
   const setPref = (k, v) => { const n = { ...pp, [k]: v }; setPp(n); rpc('push_prefs_set', { p_friends: n.friends, p_clubs: n.clubs, p_events: n.events }); };
   const ping = async () => {
@@ -3070,6 +3073,12 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
       {!!ND && (
         <Box title="Otomatik sürüş kaydı" sub={`Telefon araçta olduğunu algılayınca sürüş kaydı kendiliğinden başlar, araçtan inince biter. Uygulama kapalıyken de çalışır; sürüş uygulamayı açtığında listeye eklenir. Konum izninin "Her zaman izin ver" ve Fiziksel aktivite izninin açık olmasını ister.`}>
           <Chips opts={[['Kapalı', false], ['Açık', true]]} val={!!prefs.auto} onPick={(v) => onAuto(v)} />
+        </Box>
+      )}
+      {!!ND && ( // TEŞHİS (geçici)
+        <Box title="Algılama kaydı (geçici)" sub="Otomatik kayıt sorunu bulunana kadar duruyor. Kayıt kaçarsa bu ekranın görüntüsünü gönder.">
+          {dlog != null && <Text selectable style={[s.itemSub, { marginTop: 10, color: C.text, fontSize: 12 }]}>{dlog || 'Kayıt yok'}</Text>}
+          <TouchableOpacity style={s.btn} onPress={() => ND.getLog().then(setDlog).catch(() => setDlog('Okunamadı'))}><Text style={s.btnText}>Kaydı göster / yenile</Text></TouchableOpacity>
         </Box>
       )}
       <Box title="Sürüş yeniden izleme kaydı" sub="Seçilen günden eski sürüşlerin rota kaydı silinir, istatistiklerin ve bölgelerin kalır."><Chips opts={[7, 14, 21, 30].map((d) => [`${d} gün`, d])} val={prefs.keepDays} onPick={(v) => setPrefs({ ...prefs, keepDays: v })} /></Box>
