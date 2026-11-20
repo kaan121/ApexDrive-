@@ -1323,10 +1323,7 @@ function MediaAddSheet({ regions, cur, recent, initKey, onPick, onClose }) {
             ))}
           </ScrollView>
           <Text style={[s.itemSub, { marginTop: 8 }]}>{sel ? `Seçili: ${placeLabel(sel)}` : 'Önce bir yer seç'}</Text>
-          <View style={{ flexDirection: 'row', gap: 10 }}>
-            <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 8 }, !sel && { opacity: 0.4 }]} disabled={!sel} onPress={() => onPick(sel, 'photo', nm(sel))}><Text style={s.btnText}>Fotoğraf ekle</Text></TouchableOpacity>
-            <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 8, backgroundColor: C.card }, !sel && { opacity: 0.4 }]} disabled={!sel} onPress={() => onPick(sel, 'video', nm(sel))}><Text style={[s.btnText, { color: C.accent }]}>Video ekle</Text></TouchableOpacity>
-          </View>
+          <TouchableOpacity style={[s.btn, { marginTop: 8 }, !sel && { opacity: 0.4 }]} disabled={!sel} onPress={() => onPick(sel, nm(sel))}><Text style={s.btnText}>Fotoğraf / video ekle</Text></TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -1335,26 +1332,18 @@ function MediaAddSheet({ regions, cur, recent, initKey, onPick, onClose }) {
 
 function PhotosView({ regions, cur, openAdd, delMedia }) {
   const [view, setView] = useState(null), [vid, setVid] = useState(null);
-  const groups = placeGroups(regions, cur && cur.key), all = groups.flatMap((g) => g.items);
+  const groups = placeGroups(regions, cur && cur.key).map((g) => ({ ...g, items: g.items.filter((r) => r.photos.length || r.videos.length) })).filter((g) => g.items.length), all = groups.flatMap((g) => g.items);
   const ask = (k, u) => AlertX.alert('Silinsin mi?', 'Bu işlem geri alınamaz.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Sil', style: 'destructive', onPress: () => delMedia(k, u) }]);
   const vp = view ? (all.find((x) => x.k === view.k) || { photos: [] }).photos : [];
   return (
+    <>
     <ScrollView style={[StyleSheet.absoluteFill, { backgroundColor: C.bg }]} contentContainerStyle={{ padding: 20, paddingTop: 70, paddingBottom: 120 }}>
-      <TouchableOpacity style={[s.btn, { marginTop: 0, flexDirection: 'row', justifyContent: 'center', gap: 8 }]} onPress={() => openAdd(cur ? cur.key : null)}><Ionicons name="add" size={22} color="#06101F" /><Text style={s.btnText}>Fotoğraf / video ekle</Text></TouchableOpacity>
-      {all.length === 0 && <Text style={s.hint}>Haritada gezindikçe bölgeler burada görünür.</Text>}
+      {all.length === 0 && <Text style={s.hint}>Henüz fotoğraf ya da video eklemedin. Sağ alttaki + ile ekle.</Text>}
       {groups.map((g) => (
         <View key={g.il} style={{ marginTop: 18 }}>
           <Text style={[s.sec, { marginTop: 0 }]}>{g.il || 'Diğer'}</Text>
           {g.items.map((r) => {
             const title = r.il && r.name === r.il ? `${r.name} (il geneli)` : r.name;
-            if (!r.photos.length && !r.videos.length) {
-              return (
-                <View key={r.k} style={[s.item, { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 }]}>
-                  <View style={{ flex: 1 }}><Text style={s.itemTitle}>{title}</Text><Text style={s.itemSub}>Henüz fotoğraf ya da video yok</Text></View>
-                  <TouchableOpacity onPress={() => openAdd(r.k)} style={{ padding: 6 }}><Ionicons name="add-circle" size={28} color={C.accent} /></TouchableOpacity>
-                </View>
-              );
-            }
             return (
               <View key={r.k} style={{ marginBottom: 18 }}>
                 <Text style={[s.itemTitle, { marginBottom: 8 }]}>{title}</Text>
@@ -1379,6 +1368,8 @@ function PhotosView({ regions, cur, openAdd, delMedia }) {
       {view && <PhotoViewer photos={vp} start={view.i} onClose={() => setView(null)} onDelete={(u) => ask(view.k, u)} />}
       {vid && <VideoViewer uri={vid.u} onClose={() => setVid(null)} onDelete={(u) => { setVid(null); ask(vid.k, u); }} />}
     </ScrollView>
+    <TouchableOpacity style={s.addFab} onPress={() => openAdd(cur ? cur.key : null)}><Ionicons name="add" size={32} color="#06101F" /></TouchableOpacity>
+    </>
   );
 }
 
@@ -3457,24 +3448,22 @@ function AppInner({ ready }) {
     } catch {}
   };
 
-  const pickMedia = async (key, kind, nm) => {
+  const pickMedia = async (key, nm) => {
     setAsk(null);
-    const vid = kind === 'video';
     try {
-      const res = await ImagePicker.launchImageLibraryAsync(vid ? { mediaTypes: ['videos'], allowsMultipleSelection: true, selectionLimit: 3 } : { mediaTypes: ['images'], quality: 0.7, allowsMultipleSelection: true, selectionLimit: 10 });
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], quality: 0.7, allowsMultipleSelection: true, selectionLimit: 10 });
       if (res.canceled) return;
-      const added = [];
+      const ph = [], vd = [];
       for (const a of res.assets) {
-        const m = /\.([a-z0-9]{2,4})(\?|$)/i.exec(String(a.uri)), ext = vid ? (m ? m[1].toLowerCase() : 'mp4') : 'jpg';
-        const to = FileSystem.documentDirectory + `reg_${Date.now()}_${added.length}.${ext}`;
+        const vid = a.type === 'video', m = /\.([a-z0-9]{2,4})(\?|$)/i.exec(String(a.uri)), ext = vid ? (m ? m[1].toLowerCase() : 'mp4') : 'jpg';
+        const to = FileSystem.documentDirectory + `reg_${Date.now()}_${ph.length + vd.length}.${ext}`;
         await FileSystem.copyAsync({ from: a.uri, to });
-        added.push(to);
+        (vid ? vd : ph).push(to);
       }
-      const old = regionsRef.current[key] || {}, photos = old.photos || (old.photo ? [old.photo] : []);
-      const next = vid ? { ...old, videos: [...(old.videos || []), ...added] } : { ...old, photos: [...photos, ...added], photo: [...photos, ...added][0] };
-      saveRegions({ ...regionsRef.current, [key]: { ...next, name: old.name || nm || key.split('|')[2] || '', seen: true } });
-      if (!vid) setCur((c) => (c && c.key === key ? { ...c, photo: next.photo } : c));
-    } catch { AlertX.alert(vid ? 'Video eklenemedi' : 'Fotoğraf eklenemedi', 'Galeri iznini kontrol et. Video çok büyükse yeterli yer olmayabilir.'); }
+      const old = regionsRef.current[key] || {}, photos = [...(old.photos || (old.photo ? [old.photo] : [])), ...ph];
+      saveRegions({ ...regionsRef.current, [key]: { ...old, photos, photo: photos[0], videos: [...(old.videos || []), ...vd], name: old.name || nm || key.split('|')[2] || '', seen: true } });
+      if (ph.length) setCur((c) => (c && c.key === key ? { ...c, photo: photos[0] } : c));
+    } catch { AlertX.alert('Eklenemedi', 'Galeri iznini kontrol et. Video çok büyükse yeterli yer olmayabilir.'); }
   };
   const delMedia = (key, uri) => {
     const old = regionsRef.current[key] || {}, photos = (old.photos || []).filter((p) => p !== uri), videos = (old.videos || []).filter((v) => v !== uri);
@@ -3855,7 +3844,7 @@ function AppInner({ ready }) {
         {!!toast && <View style={s.toastW} pointerEvents="none"><View style={s.toast}><Text style={s.toastT}>{toast}</Text></View></View>}
         {news && <NewsSheet items={news} onClose={() => { AsyncStorage.setItem(NKEY, String(NEWS_VERSION)).catch(() => {}); setNews(null); }} />}
         <DialogHost dlg={dlg} onClose={() => setDlg(null)} />
-        {addMedia && <MediaAddSheet regions={regions} cur={cur} recent={addMedia.recent || []} initKey={addMedia.key} onPick={(key, kind, nm) => { setAddMedia(null); pickMedia(key, kind, nm); }} onClose={() => setAddMedia(null)} />}
+        {addMedia && <MediaAddSheet regions={regions} cur={cur} recent={addMedia.recent || []} initKey={addMedia.key} onPick={(key, nm) => { setAddMedia(null); pickMedia(key, nm); }} onClose={() => setAddMedia(null)} />}
         <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => setAsk(null)}>
           <View style={s.modalBg}>
             <View style={s.modal}>
@@ -3942,6 +3931,7 @@ const mk = () => StyleSheet.create({
   shV: { color: '#fff', fontSize: 34, fontWeight: '800' },
   shBrand: { color: '#fff', fontSize: 22, fontWeight: '800', fontStyle: 'italic' },
   dot: { width: 44, height: 44, borderRadius: 22, borderWidth: 2 },
+  addFab: { position: 'absolute', right: 16, bottom: 94, width: 58, height: 58, borderRadius: 18, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center' },
   satBtn: { position: 'absolute', right: 16, bottom: 192, width: 48, height: 48, borderRadius: 24, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center' },
   hdr: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingTop: 4 },
   hdrT: { color: C.text, fontSize: 18, fontWeight: '800', fontStyle: 'italic', marginLeft: 6 },
