@@ -27,20 +27,24 @@ class DriveService : Service() {
   private var client: FusedLocationProviderClient? = null
   private var out: FileWriter? = null
   private var lastMove = 0L
+  private var pts = 0 // TEŞHİS
+  private var bad = 0 // TEŞHİS
 
   private val callback = object : LocationCallback() {
     override fun onLocationResult(r: LocationResult) {
       val w = out ?: return
       val now = System.currentTimeMillis()
       for (l in r.locations) {
-        if (l.accuracy > 50f) continue
+        if (l.accuracy > 50f) { bad++; continue }
         val speed = if (l.hasSpeed()) l.speed else -1f
         val bearing = if (l.hasBearing()) l.bearing else -1f
         w.write("${l.time},${l.latitude},${l.longitude},$speed,${l.accuracy},$bearing\n")
+        pts++
+        if (pts == 1) Diag.add(this@DriveService, "ilk nokta alindi") // TEŞHİS
         if (speed > 1.5f) lastMove = now
       }
       w.flush()
-      if (now - lastMove > IDLE_MS) stopSelf()
+      if (now - lastMove > IDLE_MS) { Diag.add(this@DriveService, "5 dk hareketsiz, servis kendini durdurdu"); stopSelf() } // TEŞHİS
     }
   }
 
@@ -53,12 +57,14 @@ class DriveService : Service() {
     p.edit().putString("cur", name).putBoolean("rec", true).apply()
     lastMove = System.currentTimeMillis()
     out = FileWriter(File(Store.dir(this), name), true)
+    Diag.add(this, "servis basladi") // TEŞHİS
     val c = LocationServices.getFusedLocationProviderClient(this)
     client = c
     val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).setMinUpdateIntervalMillis(1000L).build()
     try {
       c.requestLocationUpdates(req, callback, Looper.getMainLooper())
     } catch (e: SecurityException) {
+      Diag.add(this, "konum izni yok, servis durdu") // TEŞHİS
       stopSelf()
     }
     return START_STICKY
@@ -80,6 +86,7 @@ class DriveService : Service() {
   }
 
   override fun onDestroy() {
+    Diag.add(this, "servis durdu: " + pts + " nokta, " + bad + " zayif konum atildi") // TEŞHİS
     client?.removeLocationUpdates(callback)
     client = null
     try { out?.close() } catch (e: Exception) {}

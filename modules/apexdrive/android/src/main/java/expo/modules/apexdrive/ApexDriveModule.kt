@@ -17,7 +17,10 @@ class ApexDriveModule : Module() {
       } else {
         Store.prefs(c).edit().putBoolean("enabled", on).putString("veh", veh).apply()
         if (on) {
-          Transitions.register(c) { promise.resolve(it) }
+          Transitions.register(c) { ok ->
+            Diag.add(c, "algilama kaydi: " + (if (ok) "basarili" else "BASARISIZ (izin?)")) // TEŞHİS
+            promise.resolve(ok)
+          }
         } else {
           Transitions.unregister(c)
           DriveService.stop(c)
@@ -43,8 +46,20 @@ class ApexDriveModule : Module() {
             val veh = f.name.removeSuffix(".jsonl").split("_").getOrElse(2) { "v0" }
             "{\"id\":\"${f.name}\",\"veh\":\"$veh\",\"pts\":[${lines.joinToString(",") { ln -> "[$ln]" }}]}"
           }
+        if (trips.isNotEmpty()) Diag.add(c, "uygulama " + trips.size + " kayit aldi") // TEŞHİS
         "[${trips.joinToString(",")}]"
       }
+    }
+
+    // TEŞHİS: geçici algılama kaydını okur / satır ekler
+    AsyncFunction("getLog") {
+      val c = appContext.reactContext
+      if (c == null) "" else Diag.read(c)
+    }
+
+    AsyncFunction("addLog") { msg: String ->
+      val c = appContext.reactContext ?: return@AsyncFunction
+      Diag.add(c, msg)
     }
 
     // Uygulama sürüşü diske yazdıktan sonra çağrılır; kayıt dosyalarını siler.

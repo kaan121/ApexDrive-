@@ -9,6 +9,7 @@ import com.google.android.gms.location.ActivityTransition
 import com.google.android.gms.location.ActivityTransitionRequest
 import com.google.android.gms.location.ActivityTransitionResult
 import com.google.android.gms.location.DetectedActivity
+import android.os.SystemClock
 import java.io.File
 
 object Store {
@@ -22,6 +23,22 @@ object Store {
     if (!p.getBoolean("rec", false) || n.isEmpty()) return ""
     return if (System.currentTimeMillis() - File(dir(c), n).lastModified() < 600000L) n else ""
   }
+}
+
+// TEŞHİS: geçici algılama kaydı (sorun bulununca kaldırılacak)
+object Diag {
+  private val fmt = java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US)
+  private fun file(c: Context) = File(c.filesDir, "apexdrive_diag.txt")
+
+  @Synchronized fun add(c: Context, msg: String) {
+    try {
+      val f = file(c)
+      if (f.length() > 30000) f.writeText(f.readLines().takeLast(150).joinToString("\n") + "\n")
+      f.appendText(fmt.format(java.util.Date()) + " " + msg + "\n")
+    } catch (e: Exception) {}
+  }
+
+  fun read(c: Context): String = try { file(c).readLines().takeLast(60).reversed().joinToString("\n") } catch (e: Exception) { "" }
 }
 
 object Transitions {
@@ -50,8 +67,15 @@ object Transitions {
 class TransitionReceiver : BroadcastReceiver() {
   override fun onReceive(c: Context, i: Intent) {
     if (!ActivityTransitionResult.hasResult(i)) return
-    if (!Store.prefs(c).getBoolean("enabled", false)) return
     val events = ActivityTransitionResult.extractResult(i)?.transitionEvents ?: return
+    val on = Store.prefs(c).getBoolean("enabled", false)
+    for (e in events) { // TEŞHİS
+      if (e.activityType != DetectedActivity.IN_VEHICLE) continue
+      val ad = if (e.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER) "GIRDI" else "CIKTI"
+      val age = (SystemClock.elapsedRealtimeNanos() - e.elapsedRealTimeNanos) / 1000000000L
+      Diag.add(c, "aracta " + ad + " (olay " + age + " sn once geldi)" + (if (on) "" else ", algilama kapali"))
+    }
+    if (!on) return
     // Toplu gelen eski olaylarda servisi açıp hemen kapatmamak için yalnızca son "araçta" olayına bakılır
     val last = events.lastOrNull { it.activityType == DetectedActivity.IN_VEHICLE } ?: return
     if (last.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER) DriveService.start(c) else DriveService.stop(c)
@@ -60,6 +84,9 @@ class TransitionReceiver : BroadcastReceiver() {
 
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(c: Context, i: Intent) {
-    if (Store.prefs(c).getBoolean("enabled", false)) Transitions.register(c)
+    if (Store.prefs(c).getBoolean("enabled", false)) {
+      Diag.add(c, "telefon acildi ya da uygulama guncellendi, algilama yeniden kuruldu") // TEŞHİS
+      Transitions.register(c)
+    }
   }
 }
