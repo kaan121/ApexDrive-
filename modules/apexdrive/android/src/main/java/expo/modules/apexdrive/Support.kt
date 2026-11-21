@@ -76,8 +76,8 @@ class TransitionReceiver : BroadcastReceiver() {
       Diag.add(c, "aracta " + ad + " (olay " + age + " sn once geldi)" + (if (on) "" else ", algilama kapali"))
     }
     if (!on) return
-    // Toplu gelen eski olaylarda servisi açıp hemen kapatmamak için yalnızca son "araçta" olayına bakılır
-    val last = events.lastOrNull { it.activityType == DetectedActivity.IN_VEHICLE } ?: return
+    // Olaylar listede zaman sırasıyla gelmeyebilir; servisi açıp hemen kapatmamak için yalnızca en yeni "araçta" olayına bakılır
+    val last = events.filter { it.activityType == DetectedActivity.IN_VEHICLE }.maxByOrNull { it.elapsedRealTimeNanos } ?: return
     if (last.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER) DriveService.start(c) else DriveService.stop(c)
   }
 }
