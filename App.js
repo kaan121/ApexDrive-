@@ -537,7 +537,8 @@ function MonthlyScreen({ trips, name, car, onClose }) {
   const W = Dimensions.get('window').width - 40, now = new Date(), shot = useRef(null);
   const ym = (ts) => { const d = new Date(ts); return d.getFullYear() * 12 + d.getMonth(); };
   const keys = [...new Set([ym(now), ...trips.map((t) => ym(t.start))])].sort((a, b) => b - a).slice(0, 6);
-  const [sel, setSel] = useState(keys[0]), [bg, setBg] = useState(0);
+  const [sel, setSel] = useState(keys[0]), [bg, setBg] = useState(0), [photo, setPhoto] = useState(null);
+  const pickBg = async () => { try { const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 }); if (!r.canceled) setPhoto(r.assets[0].uri); } catch {} };
   const y = Math.floor(sel / 12), m = sel % 12, st = monthStats(trips, y, m), info = st && st.score != null ? scoreInfo(st.score) : null;
   const title = new Date(y, m, 1).toLocaleString('tr-TR', { month: 'long', year: 'numeric' });
   const share = async () => {
@@ -551,6 +552,8 @@ function MonthlyScreen({ trips, name, car, onClose }) {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}><Text style={s.title}>Aylık Özet</Text><TouchableOpacity onPress={onClose}><Ionicons name="close" size={28} color={C.text} /></TouchableOpacity></View>
           <View style={{ alignSelf: 'flex-start', marginBottom: 14 }}><Chips opts={keys.map((k) => [new Date(Math.floor(k / 12), k % 12, 1).toLocaleString('tr-TR', { month: 'short', year: '2-digit' }), k])} val={sel} onPick={setSel} /></View>
           <View ref={shot} collapsable={false} style={{ width: W, height: W * 1.25, borderRadius: 24, overflow: 'hidden', backgroundColor: THEMES[bg], padding: 24, justifyContent: 'space-between' }}>
+            {photo && <Image source={{ uri: photo }} style={StyleSheet.absoluteFill} resizeMode="cover" />}
+            {photo && <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0006' }]} />}
             <View>
               <Text style={{ color: '#FFFFFFAA', fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>APEXDRIVE · AYLIK ÖZET</Text>
               <Text style={{ color: '#fff', fontSize: 26, fontWeight: '800', fontStyle: 'italic', marginTop: 4, textTransform: 'capitalize' }}>{title}</Text>
@@ -570,7 +573,8 @@ function MonthlyScreen({ trips, name, car, onClose }) {
             </View>
           </View>
           <View style={{ flexDirection: 'row', gap: 12, alignSelf: 'flex-start', marginTop: 14 }}>
-            {THEMES.map((c, i) => <TouchableOpacity key={c} onPress={() => setBg(i)} style={[s.dot, { backgroundColor: c, borderColor: bg === i ? C.accent : C.line }]} />)}
+            {THEMES.map((c, i) => <TouchableOpacity key={c} onPress={() => { setBg(i); setPhoto(null); }} style={[s.dot, { backgroundColor: c, borderColor: !photo && bg === i ? C.accent : C.line }]} />)}
+            <TouchableOpacity onPress={pickBg} style={[s.dot, { backgroundColor: C.card, borderColor: photo ? C.accent : C.line, alignItems: 'center', justifyContent: 'center' }]}><Ionicons name="image" size={20} color={C.text} /></TouchableOpacity>
           </View>
           <TouchableOpacity style={[s.btn, !st && { opacity: 0.4 }]} onPress={share} disabled={!st}><Text style={s.btnText}>Paylaş</Text></TouchableOpacity>
         </ScrollView>
@@ -2417,19 +2421,48 @@ function ClubMedia({ club, onClose }) {
     </Modal>
   );
 }
-function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
+const JT_OPTS = [['Serbest', 'open'], ['Onaylı', 'approval'], ['Davetle', 'invite']];
+const JT_INFO = { open: 'Herkes doğrudan katılabilir.', approval: 'Katılmak için istek gönderilir, kurucu ve yöneticiler kabul eder.', invite: 'Sadece kurucu ve yöneticilerin davet ettikleri katılabilir. Listede kilit simgesiyle görünür.' };
+function ClubSettings({ club, me, mem, setClub, bg, setBg, onClose, onChanged, onLeft }) {
   const R = useRel();
-  const [muted, setMuted] = useState(null);
+  const pickBg = async () => {
+    try {
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
+      if (r.canceled) return;
+      const to = FileSystem.documentDirectory + `chatbg_${club.id}_${Date.now()}.jpg`;
+      await FileSystem.copyAsync({ from: r.assets[0].uri, to });
+      if (bg && bg.img) FileSystem.deleteAsync(bg.img, { idempotent: true }).catch(() => {});
+      setBg({ img: to });
+    } catch { AlertX.alert('Arka plan eklenemedi', 'Galeri iznini kontrol et.'); }
+  };
+  const clearBg = (b) => { if (bg && bg.img) FileSystem.deleteAsync(bg.img, { idempotent: true }).catch(() => {}); setBg(b); };
+  const [muted, setMuted] = useState(null), [jr, setJr] = useState([]), [invName, setInvName] = useState('');
   useEffect(() => { rpc('club_mute_list').then((j) => setMuted(Array.isArray(j) ? j.some((x) => x.club_id === club.id) : null)); }, []);
   const [sel, setSel] = useState(null), [media, setMedia] = useState(false), [nm, setNm] = useState(club.name), [ab, setAb] = useState(club.about || '');
   const isOwner = club.owner === me.username, mine = mem.find((m) => m.username === me.username), isAdmin = !!mine && mine.role === 'admin', isM = !!mine || isOwner;
   const can = (m) => m.username !== me.username && m.username !== club.owner && (isOwner || (isAdmin && m.role !== 'admin'));
+  const staff = isOwner || isAdmin;
+  const loadJr = async () => { try { const r = await api(`club_join?club_id=eq.${club.id}&select=username,kind&order=created_at.desc`); const j = r.ok ? await r.json() : []; setJr(Array.isArray(j) ? j : []); } catch {} };
+  useEffect(() => { if (staff) loadJr(); }, [staff]);
+  const joinFail = () => AlertX.alert('İşlem yapılamadı', 'İnternetini kontrol et. Sorun sürerse sunucuda katılım güncellemesi (SQL) eksik olabilir.');
+  const sendInvite = async () => {
+    const u = invName.trim().toLowerCase();
+    if (!u) return;
+    const r = await rpc('club_invite', { p_club: club.id, p_username: u });
+    if (typeof r !== 'string') return joinFail();
+    if (r === 'notfound') return AlertX.alert('Kullanıcı bulunamadı', 'Kullanıcı adını kontrol et.');
+    if (r === 'member') return AlertX.alert('Zaten üye', u);
+    if (r === 'joined') AlertX.alert('Kulübe eklendi', `${u} katılma isteği göndermişti, üye yapıldı.`);
+    setInvName(''); loadJr(); onChanged();
+  };
+  const answerReq = async (u, acc) => { const r = await rpc('club_join_respond', { p_club: club.id, p_username: u, p_accept: acc }); if (typeof r !== 'string') joinFail(); loadJr(); onChanged(); };
+  const cancelJoin = async (u) => { const r = await rpc('club_join_cancel', { p_club: club.id, p_username: u }); if (typeof r !== 'string') joinFail(); loadJr(); };
   const names = (a) => a.map(encodeURIComponent).join(',');
   const patchClub = async (patch) => {
     try {
       const r = await api(`clubs?id=eq.${club.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
       if (r.status === 409) return AlertX.alert('Bu kulüp adı alınmış', 'Başka bir ad dene.');
-      if (!r.ok) return AlertX.alert('Kaydedilemedi', patch.photo !== undefined ? 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.' : 'Tekrar dene.');
+      if (!r.ok) return AlertX.alert('Kaydedilemedi', patch.photo !== undefined || patch.join_type !== undefined || patch.preview !== undefined ? 'Sunucuda kulüp güncellemesi (SQL) eksik olabilir.' : 'Tekrar dene.');
       setClub({ ...club, ...patch });
     } catch { AlertX.alert('Kaydedilemedi', 'Bağlantını kontrol et.'); }
   };
@@ -2476,6 +2509,14 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
               </View>
             ) : (<View style={{ alignItems: 'center' }}><Text style={[s.name, { marginTop: 10 }]}>{club.name}</Text>{!!club.about && <Text style={s.itemSub}>{club.about}</Text>}</View>)}
           </View>
+          {isOwner && (
+            <View style={s.item}>
+              <Text style={s.itemTitle}>Katılım türü</Text><Text style={s.itemSub}>{JT_INFO[club.join_type || 'open']}</Text>
+              <Chips opts={JT_OPTS} val={club.join_type || 'open'} onPick={(v) => patchClub({ join_type: v })} />
+              <Text style={[s.itemTitle, { marginTop: 16 }]}>Katılmadan mesajları görme</Text><Text style={s.itemSub}>{club.preview ? 'Üye olmayanlar mesajları okuyabilir, yazamaz.' : 'Mesajları sadece üyeler görür.'}</Text>
+              <Chips opts={[['Kapalı', false], ['Açık', true]]} val={!!club.preview} onPick={(v) => patchClub({ preview: v })} />
+            </View>
+          )}
           {isM && muted !== null && (
             <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => { const v = !muted; setMuted(v); rpc('club_mute_set', { p_club: club.id, p_muted: v }); }}>
               <Ionicons name={muted ? 'notifications-off' : 'notifications'} size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Kulüp bildirimleri</Text><Text style={s.itemSub}>{muted ? 'Sessiz' : 'Açık'}</Text>
@@ -2484,6 +2525,31 @@ function ClubSettings({ club, me, mem, setClub, onClose, onChanged, onLeft }) {
           <TouchableOpacity style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => setMedia(true)}>
             <Ionicons name="images" size={24} color={C.accent} /><Text style={[s.itemTitle, { flex: 1 }]}>Medya, dosya ve linkler</Text><Ionicons name="chevron-forward" size={20} color={C.dim} />
           </TouchableOpacity>
+          <View style={s.item}>
+            <Text style={s.itemTitle}>Sohbet arka planı</Text><Text style={s.itemSub}>Sadece senin telefonunda görünür.</Text>
+            <Chips opts={[['Yok', -1], ...THEMES.map((c, i) => [['Lacivert', 'Mor', 'Kırmızı', 'Yeşil'][i], i])]} val={bg ? (bg.c != null ? THEMES.indexOf(bg.c) : -2) : -1} onPick={(i) => clearBg(i < 0 ? null : { c: THEMES[i] })} />
+            <TouchableOpacity style={[s.fpill, { alignSelf: 'flex-start', marginTop: 10 }]} onPress={pickBg}><Ionicons name="image" size={16} color={C.text} /><Text style={s.navText}>{bg && bg.img ? 'Başka fotoğraf seç' : 'Galeriden seç'}</Text></TouchableOpacity>
+          </View>
+          {staff && club.join_type === 'invite' && (
+            <View style={s.item}>
+              <Text style={s.itemTitle}>Kullanıcı davet et</Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                <TextInput style={[s.input, { flex: 1, marginTop: 0, padding: 12 }]} value={invName} onChangeText={setInvName} placeholder="kullanıcı adı" placeholderTextColor={C.dim} autoCapitalize="none" autoCorrect={false} />
+                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={sendInvite}><Ionicons name="send" size={18} color="#06101F" /></TouchableOpacity>
+              </View>
+            </View>
+          )}
+          {staff && jr.some((x) => x.kind === 'request') && <Text style={s.sec}>Katılma istekleri ({jr.filter((x) => x.kind === 'request').length})</Text>}
+          {staff && jr.filter((x) => x.kind === 'request').map((x) => (
+            <PersonRow key={x.username} name={x.username} right={
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={() => answerReq(x.username, true)}><Text style={[s.navText, { color: '#06101F' }]}>Kabul</Text></TouchableOpacity>
+                <TouchableOpacity style={s.fpill} onPress={() => answerReq(x.username, false)}><Ionicons name="close" size={16} color={C.text} /></TouchableOpacity>
+              </View>
+            } />
+          ))}
+          {staff && jr.some((x) => x.kind === 'invite') && <Text style={s.sec}>Bekleyen davetler</Text>}
+          {staff && jr.filter((x) => x.kind === 'invite').map((x) => <PersonRow key={x.username} name={x.username} right={<TouchableOpacity style={s.fpill} onPress={() => cancelJoin(x.username)}><Text style={s.navText}>İptal</Text></TouchableOpacity>} />)}
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text style={s.sec}>Üyeler ({mem.length})</Text>
             {(isOwner || isAdmin) && <TouchableOpacity onPress={() => setSel(sel ? null : [])}><Text style={{ color: C.accent, fontWeight: '700' }}>{sel ? 'Bitti' : 'Seç'}</Text></TouchableOpacity>}
@@ -2654,6 +2720,9 @@ function EventsSheet({ club, me, staff, evs, reload, onClose }) {
 function ClubView({ club: club0, me, onBack }) {
   const [club, setClub] = useState(club0), [mem, setMem] = useState([]), [posts, setPosts] = useState([]), [pin, setPin] = useState(null), [txt, setTxt] = useState(''), [edit, setEdit] = useState(null);
   const [stk, setStk] = useState(false), [att, setAtt] = useState(false), [set, setSet] = useState(false), [big, setBig] = useState(null), [hl, setHl] = useState(null), [limit, setLimit] = useState(60), [jump, setJump] = useState(null);
+  const [bg, setBgState] = useState(null), bgKey = '@apexdrive_chatbg_' + club0.id;
+  useEffect(() => { AsyncStorage.getItem(bgKey).then((v) => v && setBgState(JSON.parse(v))).catch(() => {}); }, []);
+  const setBg = (b) => { setBgState(b); if (b) AsyncStorage.setItem(bgKey, JSON.stringify(b)).catch(() => {}); else AsyncStorage.removeItem(bgKey).catch(() => {}); };
   const listRef = useRef(null), kb = useKbd(), [evs, setEvs] = useState({ up: [], past: [], rs: [], err: false }), [evOpen, setEvOpen] = useState(false);
   const staff = club.owner === me.username || mem.some((m) => m.username === me.username && m.role === 'admin');
   const isM = mem.some((m) => m.username === me.username) || club.owner === me.username;
@@ -2751,9 +2820,22 @@ function ClubView({ club: club0, me, onBack }) {
       send({ kind: 'file', media: b, meta: JSON.stringify({ name: a.name, size: a.size, mime: a.mimeType }) });
     } catch { AlertX.alert('Dosya gönderilemedi', 'Tekrar dene.'); }
   };
-  const join = async () => { try { await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: club.id, username: me.username }) }); load(); } catch {} };
+  const [jn, setJn] = useState(null);
+  const loadJoin = async () => { try { const r = await api(`club_join?club_id=eq.${club.id}&username=eq.${encodeURIComponent(me.username)}&select=kind`); const j = r.ok ? await r.json() : []; setJn(Array.isArray(j) && j[0] ? j[0].kind : null); } catch {} };
+  useEffect(() => { if (!isM) loadJoin(); }, [isM]);
+  const joinFail = () => AlertX.alert('İşlem yapılamadı', 'İnternetini kontrol et. Sorun sürerse sunucuda katılım güncellemesi (SQL) eksik olabilir.');
+  const join = async () => {
+    const r = await rpc('club_join_request', { p_club: club.id });
+    if (typeof r !== 'string') return joinFail();
+    if (r === 'requested') AlertX.alert('İstek gönderildi', 'Kulüp yöneticileri kabul edince üye olacaksın.');
+    else if (r === 'invited') AlertX.alert('Davetin var', 'Bu kulüp seni davet etmiş, daveti kabul edebilirsin.');
+    else if (r === 'invite_only') AlertX.alert('Sadece davetle', 'Bu kulübe yalnızca davetle katılınır.');
+    load(); loadJoin();
+  };
+  const answerInvite = async (ok) => { const r = await rpc('club_invite_respond', { p_club: club.id, p_accept: ok }); if (typeof r !== 'string') joinFail(); load(); loadJoin(); };
+  const cancelReq = async () => { const r = await rpc('club_join_cancel', { p_club: club.id, p_username: me.username }); if (typeof r !== 'string') joinFail(); loadJoin(); };
   const Bub = ({ p }) => {
-    const mine = p.username === me.username, k = p.kind || 'text', lp = () => msgMenu(p);
+    const mine = p.username === me.username, k = p.kind || 'text', lp = () => isM && msgMenu(p);
     const body = k === 'image' ? <MediaImg id={p.id} style={{ width: 220, height: 220, borderRadius: 14 }} onPress={(u) => u && setBig(u)} onLong={lp} />
       : k === 'sticker' ? (p.meta === 'img' ? <MediaImg id={p.id} contain onLong={lp} style={{ width: 120, height: 120 }} /> : <Text style={{ fontSize: 56 }}>{p.body}</Text>)
       : k === 'file' ? (
@@ -2789,10 +2871,30 @@ function ClubView({ club: club0, me, onBack }) {
         </TouchableOpacity>
       )}
       {pin && <PinBar pin={pin} onGo={() => goTo(pin.id)} onClose={() => togglePin(pin)} />}
-      {!isM && <TouchableOpacity style={[s.btn, { margin: 14 }]} onPress={join}><Text style={s.btnText}>Kulübe katıl</Text></TouchableOpacity>}
+      {!isM && (
+        <View style={{ margin: 14 }}>
+          {jn === 'invite' ? (
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 0 }]} onPress={() => answerInvite(true)}><Text style={s.btnText}>Daveti kabul et</Text></TouchableOpacity>
+              <TouchableOpacity style={[s.btn, { flex: 1, width: undefined, marginTop: 0, backgroundColor: C.card }]} onPress={() => answerInvite(false)}><Text style={[s.btnText, { color: C.text }]}>Reddet</Text></TouchableOpacity>
+            </View>
+          ) : jn === 'request' ? (
+            <TouchableOpacity style={[s.btn, { marginTop: 0, backgroundColor: C.card }]} onPress={cancelReq}><Text style={[s.btnText, { color: C.text }]}>İstek gönderildi · Geri çek</Text></TouchableOpacity>
+          ) : club.join_type === 'invite' ? (
+            <Text style={[s.itemSub, { textAlign: 'center' }]}>🔒 Bu kulübe sadece davetle katılınır.</Text>
+          ) : (
+            <TouchableOpacity style={[s.btn, { marginTop: 0 }]} onPress={join}><Text style={s.btnText}>{club.join_type === 'approval' ? 'Katılma isteği gönder' : 'Kulübe katıl'}</Text></TouchableOpacity>
+          )}
+        </View>
+      )}
+      <View style={{ flex: 1 }}>
+      {bg && bg.c && <View style={[StyleSheet.absoluteFill, { backgroundColor: bg.c }]} />}
+      {bg && bg.img && <Image source={{ uri: bg.img }} style={StyleSheet.absoluteFill} resizeMode="cover" />}
+      {bg && bg.img && <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0006' }]} />}
       <FlatList ref={listRef} inverted data={posts} extraData={hl} keyExtractor={(p) => String(p.id)} contentContainerStyle={{ padding: 14 }}
         onScrollToIndexFailed={(info) => { listRef.current && listRef.current.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true }); setTimeout(() => { try { listRef.current && listRef.current.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }); } catch {} }, 350); }}
-        ListEmptyComponent={<Text style={[s.hint, { transform: [{ scaleY: -1 }] }]}>Henüz mesaj yok.</Text>} renderItem={({ item }) => <Bub p={item} />} />
+        ListEmptyComponent={<Text style={[s.hint, { transform: [{ scaleY: -1 }] }]}>{isM || club.preview ? 'Henüz mesaj yok.' : 'Mesajları kulübe katıldıktan sonra görebilirsin.'}</Text>} renderItem={({ item }) => <Bub p={item} />} />
+      </View>
       {isM && (
         <View>
           {edit && (
@@ -2827,7 +2929,7 @@ function ClubView({ club: club0, me, onBack }) {
         </Modal>
       )}
       {stk && <StickerSheet onClose={() => setStk(false)} onPick={(r) => { setStk(false); send(r); }} />}
-      {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
+      {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} bg={bg} setBg={setBg} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
       {evOpen && <EventsSheet club={club} me={me} staff={staff} evs={evs} reload={loadEvents} onClose={() => setEvOpen(false)} />}
       {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
     </View>
@@ -2940,31 +3042,35 @@ function FriendsScreen({ me, onClose, onChanged }) {
 }
 
 function ClubsScreen({ me, onClose, openId }) {
-  const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState('');
+  const [clubs, setClubs] = useState([]), [mine, setMine] = useState([]), [sel, setSel] = useState(null), [q, setQ] = useState(''), [mk, setMk] = useState(false), [nm, setNm] = useState(''), [ab, setAb] = useState(''), [jt, setJt] = useState('open'), [inv, setInv] = useState([]);
   const opened = useRef(false);
   const load = async () => {
     if (!online) return;
     try {
-      let r = await api('clubs?select=id,name,about,vtype,owner,photo&order=created_at.desc&limit=100');
+      let r = await api('clubs?select=id,name,about,vtype,owner,photo,join_type,preview&order=created_at.desc&limit=100');
+      if (!r.ok) r = await api('clubs?select=id,name,about,vtype,owner,photo&order=created_at.desc&limit=100');
       if (!r.ok) r = await api('clubs?select=id,name,about,vtype,owner&order=created_at.desc&limit=100');
       const c = await r.json();
       setClubs(Array.isArray(c) ? c : []);
       if (openId && !opened.current && Array.isArray(c)) { const hit = c.find((x) => String(x.id) === String(openId)); if (hit) { opened.current = true; setSel(hit); } }
       const m = await (await api(`club_members?username=eq.${me.username}&select=club_id`)).json();
       setMine(Array.isArray(m) ? m.map((x) => x.club_id) : []);
+      const iv = await (await api(`club_join?username=eq.${encodeURIComponent(me.username)}&kind=eq.invite&select=club_id`)).json();
+      setInv(Array.isArray(iv) ? iv.map((x) => x.club_id) : []);
     } catch {}
   };
   useEffect(() => { load(); }, []);
+  const answerInvite = async (id, ok) => { const r = await rpc('club_invite_respond', { p_club: id, p_accept: ok }); if (typeof r !== 'string') AlertX.alert('İşlem yapılamadı', 'İnternetini kontrol edip tekrar dene.'); load(); };
   const create = async () => {
     const n = nm.trim();
     if (n.length < 3) return AlertX.alert('Kulüp adı en az 3 karakter olmalı');
     try {
-      const r = await api('clubs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: n, about: ab.trim(), vtype: me.car?.vtype || 'car', owner: me.username }) });
+      const r = await api('clubs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: n, about: ab.trim(), vtype: me.car?.vtype || 'car', owner: me.username, ...(jt !== 'open' ? { join_type: jt } : {}) }) });
       if (r.status === 409) return AlertX.alert('Bu kulüp adı alınmış');
       const [c] = await r.json();
       let m = await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username, role: 'owner' }) });
       if (!m.ok) await api('club_members', { method: 'POST', body: JSON.stringify({ club_id: c.id, username: me.username }) });
-      setMk(false); setNm(''); setAb(''); load(); setSel(c);
+      setMk(false); setNm(''); setAb(''); setJt('open'); load(); setSel(c);
     } catch { AlertX.alert('Kulüp oluşturulamadı', 'Bağlantını ve sunucu ayarlarını kontrol et.'); }
   };
   const list = clubs.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
@@ -2984,17 +3090,30 @@ function ClubsScreen({ me, onClose, openId }) {
               <View style={[s.card, { marginBottom: 12, flexBasis: undefined }]}>
                 <TextInput style={[s.input, { marginTop: 0 }]} value={nm} onChangeText={setNm} placeholder="Kulüp adı" placeholderTextColor={C.dim} maxLength={40} />
                 <TextInput style={s.input} value={ab} onChangeText={setAb} placeholder="Kısa açıklama (marka, şehir, tarz...)" placeholderTextColor={C.dim} maxLength={140} />
+                <Text style={[s.itemSub, { marginTop: 14 }]}>Katılım türü</Text>
+                <Chips opts={JT_OPTS} val={jt} onPick={setJt} />
+                <Text style={[s.itemSub, { marginTop: 8 }]}>{JT_INFO[jt]}</Text>
                 <TouchableOpacity style={s.btn} onPress={create}><Text style={s.btnText}>Kur</Text></TouchableOpacity>
               </View>
             )}
+            {clubs.some((c) => inv.includes(c.id)) && <Text style={[s.sec, { marginTop: 4 }]}>Davetler</Text>}
+            {clubs.filter((c) => inv.includes(c.id)).map((c) => (
+              <View key={'i' + c.id} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+                <Av club={c} size={46} />
+                <View style={{ flex: 1 }}><Text style={s.itemTitle}>{c.name}</Text><Text style={s.itemSub}>Seni davet etti</Text></View>
+                <TouchableOpacity style={[s.fpill, { backgroundColor: C.accent }]} onPress={() => answerInvite(c.id, true)}><Text style={[s.navText, { color: '#06101F' }]}>Kabul</Text></TouchableOpacity>
+                <TouchableOpacity style={s.fpill} onPress={() => answerInvite(c.id, false)}><Ionicons name="close" size={16} color={C.text} /></TouchableOpacity>
+              </View>
+            ))}
             {list.length === 0 && <Text style={s.hint}>Henüz kulüp yok. İlkini sen kur.</Text>}
             {list.map((c) => (
               <TouchableOpacity key={c.id} style={[s.item, { flexDirection: 'row', alignItems: 'center', gap: 12 }]} onPress={() => setSel(c)}>
                 <Av club={c} size={46} />
                 <View style={{ flex: 1 }}>
                   <Text style={s.itemTitle}>{c.name}{mine.includes(c.id) ? '  ✓' : ''}</Text>
-                  <Text style={s.itemSub} numberOfLines={1}>{c.vtype === 'moto' ? 'Motor' : 'Araba'}{c.about ? ' · ' + c.about : ''}</Text>
+                  <Text style={s.itemSub} numberOfLines={1}>{c.vtype === 'moto' ? 'Motor' : 'Araba'}{c.join_type === 'approval' ? ' · Onaylı' : c.join_type === 'invite' ? ' · Davetle' : ''}{c.about ? ' · ' + c.about : ''}</Text>
                 </View>
+                {c.join_type === 'invite' && <Ionicons name="lock-closed" size={20} color={C.dim} />}
               </TouchableOpacity>
             ))}
           </ScrollView>
