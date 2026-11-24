@@ -145,7 +145,7 @@ function persistDrive(force) {
   if (!driving || (!force && now - lastSave < 8000)) return;
   lastSave = now;
   const { kf, last, route, ...rest } = R; // yumuşatma ve son örnek yeniden başlayınca sıfırlanır
-  AsyncStorage.setItem(DKEY, JSON.stringify({ ...rest, rt: encRoute(route), savedAt: now })).catch(() => {});
+  return AsyncStorage.setItem(DKEY, JSON.stringify({ ...rest, rt: encRoute(route), savedAt: now })).catch(() => {});
 }
 async function loadSnap() {
   try {
@@ -199,6 +199,17 @@ async function hideRecNotice() {
 // ---- Otomatik sürüş (Android): yerel modül telefon "araçta" olunca konumu kendisi kaydeder, uygulama bitmiş sürüşleri içe alır ----
 const ND = (() => { try { return Platform.OS === 'android' ? requireNativeModule('ApexDrive') : null; } catch { return null; } })();
 // Sürüş kaydını sürüş listesindeki kayda çevirir (canlı ve yarım kalan sürüşlerle aynı biçim)
+const setBusy = (v) => { if (ND) ND.setBusy(v).catch(() => {}); }; // yerel modül: uygulama sürüş kaydederken yeni otomatik kayıt başlamasın
+// Konum takibini başlatır: 'bg' arka plan, 'fg' sadece ön plan, null başlatılamadı
+async function startTracking() {
+  const opts = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 };
+  try {
+    await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Konum takibi açık', killServiceOnDestroy: false } });
+    return 'bg';
+  } catch {
+    try { watchSub = await Location.watchPositionAsync(opts, processLoc); return 'fg'; } catch { return null; }
+  }
+}
 function buildTrip(d, interrupted) {
   finishCurve(d);
   const duration = ((interrupted ? d.savedAt || Date.now() : Date.now()) - d.t0) / 1000, mov = d.movingMs / 3600000;
@@ -206,14 +217,18 @@ function buildTrip(d, interrupted) {
   t.score = driveScore(t); t.scoreV = 2;
   return t;
 }
-// Yerel modülün kaydettiği noktaları [zaman, enlem, boylam, hız, doğruluk, yön] canlı sürüşle aynı hesaptan geçirir
-function tripFromPoints(ps, veh) {
-  if (!ps || ps.length < 2) { ND.addLog(`iceri aktarildi: ${ps ? ps.length : 0} nokta, cok kisa -> elendi`).catch(() => {}); return null; } // TEŞHİS
-  const prev = { R, onTick, lastSave }, d = fresh(veh);
+// Yerel modülün kaydettiği noktaları [zaman, enlem, boylam, hız, doğruluk, yön] canlı sürüşle aynı hesaptan geçirip sürüş kaydını döndürür
+function replayPoints(ps, veh) {
+  const prev = { R, onTick, lastSave, driving }, d = fresh(veh);
   d.t0 = ps[0][0]; d.auto = true;
   R = d; driving = true; onTick = null; lastSave = Infinity; // hesap sırasında ekran güncellenmesin, diske yazılmasın
   try { ps.forEach((p) => processLoc({ timestamp: p[0], coords: { latitude: p[1], longitude: p[2], speed: p[3] >= 0 ? p[3] : null, accuracy: p[4], heading: p[5] >= 0 ? p[5] : -1 } })); }
-  finally { driving = false; R = prev.R; onTick = prev.onTick; lastSave = prev.lastSave; }
+  finally { driving = prev.driving; R = prev.R; onTick = prev.onTick; lastSave = prev.lastSave; }
+  return d;
+}
+function tripFromPoints(ps, veh) {
+  if (!ps || ps.length < 2) { ND.addLog(`iceri aktarildi: ${ps ? ps.length : 0} nokta, cok kisa -> elendi`).catch(() => {}); return null; } // TEŞHİS
+  const d = replayPoints(ps, veh);
   d.savedAt = ps[ps.length - 1][0];
   const ok = d.dist >= 0.3 && d.max >= 20; // GPS kayması: yerinde dururken oluşan sahte sürüşler atılır
   ND.addLog(`iceri aktarildi: ${ps.length} nokta, ${d.dist.toFixed(2)} km, en yuksek ${Math.round(d.max)} km/s -> ${ok ? 'eklendi' : 'elendi'}`).catch(() => {}); // TEŞHİS
@@ -3190,7 +3205,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
     drive: (
       <>
       {!!ND && (
-        <Box title="Otomatik sürüş kaydı" sub={`Telefon araçta olduğunu algılayınca sürüş kaydı kendiliğinden başlar, araçtan inince biter. Uygulama kapalıyken de çalışır; sürüş uygulamayı açtığında listeye eklenir. Konum izninin "Her zaman izin ver" ve Fiziksel aktivite izninin açık olmasını ister.`}>
+        <Box title="Otomatik sürüş kaydı" sub={`Telefon araçta olduğunu algılayınca sürüş kaydı kendiliğinden başlar. Uygulama kapalıyken de çalışır. Uygulamayı açtığında süren sürüş Sürüş ekranında canlı görünür ve istersen sen bitirirsin; açmazsan araçtan inince kendiliğinden biter ve listeye eklenir. Konum izninin "Her zaman izin ver" ve Fiziksel aktivite izninin açık olmasını ister.`}>
           <Chips opts={[['Kapalı', false], ['Açık', true]]} val={!!prefs.auto} onPick={(v) => onAuto(v)} />
         </Box>
       )}
@@ -3515,7 +3530,7 @@ function AppInner({ ready }) {
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
-  const pLoaded = useRef(false), tripsReady = useRef(false), importing = useRef(false);
+  const pLoaded = useRef(false), tripsReady = useRef(false), importing = useRef(false), uiReady = useRef(false);
   const [pReady, setPReady] = useState(false);
   const [dlg, setDlg] = useState(null);
   Dlg.show = setDlg;
@@ -3541,7 +3556,7 @@ function AppInner({ ready }) {
   useEffect(() => {
     loadTrips().then(({ list, blocked }) => {
       setTrips(list); const rd = resumeDrive(list);
-      if (!blocked) rd.finally(() => { tripsReady.current = true; importAuto(); });
+      if (!blocked) rd.finally(() => { tripsReady.current = true; adoptAuto().finally(importAuto); });
       if (blocked) AlertX.alert('Sürüş kayıtları okunamadı', 'Kayıtların korunması için yeni sürüşler bu oturumda kaydedilmeyecek. Lütfen uygulamayı yeniden başlat; sorun sürerse bize bildir.');
     });
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
@@ -3614,7 +3629,7 @@ function AppInner({ ready }) {
     ensureRecNotice(true);
   };
   const finishInterrupted = (d, list) => {
-    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {}); hideRecNotice();
+    driving = false; endedT0 = d.t0; AsyncStorage.removeItem(DKEY).catch(() => {}); hideRecNotice(); setBusy(false);
     if (d.dist < 0.05 || list.some((x) => x.id === String(d.t0))) return; // çok kısa ya da zaten kayıtlı
     finishTrip(d, list, true);
     AlertX.alert('Yarım kalan sürüşün kaydedildi', `${d.dist.toFixed(1)} km. Uygulama sürüş sırasında kapanmış ya da konum takibi durmuş. Kayıt kesildiği ana kadar saklandı. Sık yaşanıyorsa Ayarlar → Bildirimler bölümünden pil kısıtlamasını ve otomatik başlatma iznini aç.`);
@@ -3624,7 +3639,7 @@ function AppInner({ ready }) {
     try { running = await Location.hasStartedLocationUpdatesAsync(TASK); } catch {}
     if (driving) { if (running || watchSub) reflectDrive(); else finishInterrupted(R, list); return; }
     const snap = await loadSnap();
-    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } hideRecNotice(); return; }
+    if (!snap) { if (running) { try { await Location.stopLocationUpdatesAsync(TASK); } catch {} } hideRecNotice(); setBusy(false); return; }
     if (running) { R = snap; driving = true; reflectDrive(); } else finishInterrupted(snap, list);
   };
 
@@ -3642,8 +3657,26 @@ function AppInner({ ready }) {
     } catch {} finally { importing.current = false; }
   };
 
+  // Uygulama açıkken yerel modül bir sürüş kaydediyorsa onu devralır: Sürüş ekranında canlı görünür, bitirmeyi sen yaparsın.
+  const adoptAuto = async () => {
+    if (!ND || driving || !tripsReady.current || !uiReady.current || importing.current || AppState.currentState !== 'active') return;
+    importing.current = true;
+    try {
+      const raw = await ND.takeActive();
+      if (!raw) return;
+      const a = JSON.parse(raw);
+      if (!a.pts || a.pts.length < 2 || driving) return; // dosya kalır, bitince normal içe aktarma alır
+      R = replayPoints(a.pts, a.veh); driving = true; lastSave = 0; endedT0 = 0;
+      await persistDrive(true);
+      if (!(await startTracking())) { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return; }
+      ND.ackTrips([a.id]); setBusy(true); reflectDrive();
+      setToast('🚗 Otomatik sürüş devam ediyor'); setTimeout(() => setToast(''), 2800);
+    } catch {} finally { importing.current = false; }
+  };
+
   const start = async () => {
     if (driving) return reflectDrive();
+    if (ND) { await adoptAuto(); if (driving) return; } // çalışan otomatik kayıt varsa ikinci kayıt açma, onu devral
     vidRef.current = (profile && profile.vid) || 'v0';
     const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
@@ -3657,15 +3690,12 @@ function AppInner({ ready }) {
     persistDrive(true);
     setLive({ speed: 0, dist: 0, max: 0, g: 0, secs: 0 });
     setRoute([]);
-    const opts = { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 };
-    try {
-      await Location.startLocationUpdatesAsync(TASK, { ...opts, showsBackgroundLocationIndicator: true, foregroundService: { notificationTitle: 'ApexDrive', notificationBody: 'Konum takibi açık', killServiceOnDestroy: false } });
-    } catch {
-      // Arka plan takibi başlamadıysa ön plan takibine düş ve kullanıcıyı uyar
-      try { watchSub = await Location.watchPositionAsync(opts, processLoc); } catch { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return AlertX.alert('Konum alınamadı', 'Konum servisini ve iznini kontrol edip tekrar dene.'); }
+    const mode = await startTracking();
+    if (!mode) { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return AlertX.alert('Konum alınamadı', 'Konum servisini ve iznini kontrol edip tekrar dene.'); }
+    if (mode === 'fg') { // arka plan takibi başlamadı, ön plana düştü: kullanıcıyı uyar
       AlertX.alert('Arka plan takibi başlatılamadı', 'Sürüş sadece uygulama açıkken ve ekran açıkken kaydedilir. Konum iznini "Her zaman izin ver" yapmayı dene.');
     }
-    onRef.current = true; setOn(true);
+    onRef.current = true; setOn(true); setBusy(true);
     showRecNotice(true);
   };
 
@@ -3675,11 +3705,11 @@ function AppInner({ ready }) {
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
     if (watchSub) { watchSub.remove(); watchSub = null; }
     AsyncStorage.removeItem(DKEY).catch(() => {});
-    hideRecNotice();
+    hideRecNotice(); setBusy(false);
     onRef.current = false; setOn(false);
     if (pending.current && pending.current.length) setAsk({ list: pending.current });
     pending.current = null;
-    if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
+    if (d.dist < (d.auto ? 0.3 : 0.05) || (d.auto && d.max < 20)) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const t = finishTrip(d, trips, false);
     setTab('profile');
     setShareTrip(t);
@@ -3822,6 +3852,8 @@ function AppInner({ ready }) {
     return () => clearTimeout(id);
   }, [docsBy, rem, vehicles.length, ready]);
   tabRef.current = tab;
+  uiReady.current = !!profile && acct === 'in';
+  useEffect(() => { if (!ND) return; const id = setInterval(adoptAuto, 5000); return () => clearInterval(id); }, []);
   useEffect(() => {
     if (!pReady || !profile || !ready) return;
     AsyncStorage.getItem(NKEY).then((v) => {
@@ -3841,7 +3873,7 @@ function AppInner({ ready }) {
     });
     return () => sub.remove();
   }, []);
-  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') { notifyUpdate(); if (driving) reflectDrive(); importAuto(); } else persistDrive(true); }); return () => sub.remove(); }, []);
+  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') { notifyUpdate(); if (driving) reflectDrive(); adoptAuto().finally(importAuto); } else persistDrive(true); }); return () => sub.remove(); }, []);
   useEffect(() => { AsyncStorage.getItem(LKEY).then((v) => v && setLaunches(JSON.parse(v))).catch(() => {}); }, []);
   const saveLaunch = (r) => setLaunches((p) => { const n = [r, ...p].slice(0, 200); AsyncStorage.setItem(LKEY, JSON.stringify(n)).catch(() => {}); return n; });
   useEffect(() => { if (pReady && ready) scheduleDaily(prefs, trips); }, [pReady, ready, prefs.daily, trips.length]);
