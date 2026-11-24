@@ -16,6 +16,15 @@ object Store {
   fun prefs(c: Context) = c.getSharedPreferences("apexdrive_native", Context.MODE_PRIVATE)
   fun dir(c: Context): File = File(c.filesDir, "apexdrive_trips").apply { mkdirs() }
 
+  // Kayıt dosyasını uygulamanın okuyacağı JSON'a çevirir: {id, veh, pts: [[zaman, enlem, boylam, hız, doğruluk, yön], ...]}
+  fun tripJson(f: File): String {
+    val num = Regex("^[-0-9.,E]+$")
+    // Son satır yarım kalmış olabilir (dosyanın sonu "\n" değilse), o yüzden atılır
+    val lines = f.readText().split("\n").dropLast(1).filter { ln -> ln.count { ch -> ch == ',' } == 5 && num.matches(ln) }
+    val veh = f.name.removeSuffix(".jsonl").split("_").getOrElse(2) { "v0" }
+    return "{\"id\":\"${f.name}\",\"veh\":\"$veh\",\"pts\":[${lines.joinToString(",") { ln -> "[$ln]" }}]}"
+  }
+
   // Şu an kaydı süren sürüşün dosya adı (yoksa boş). Sistem servisi öldürüp bayrak açık kalırsa 10 dk sonra eski sayılır.
   fun activeName(c: Context): String {
     val p = prefs(c)
@@ -76,6 +85,10 @@ class TransitionReceiver : BroadcastReceiver() {
       Diag.add(c, "aracta " + ad + " (olay " + age + " sn once geldi)" + (if (on) "" else ", algilama kapali"))
     }
     if (!on) return
+    if (Store.prefs(c).getBoolean("busy", false)) { // uygulama zaten sürüş kaydediyor
+      Diag.add(c, "uygulama suruste, olay yoksayildi") // TEŞHİS
+      return
+    }
     // Olaylar listede zaman sırasıyla gelmeyebilir; servisi açıp hemen kapatmamak için yalnızca en yeni "araçta" olayına bakılır
     val last = events.filter { it.activityType == DetectedActivity.IN_VEHICLE }.maxByOrNull { it.elapsedRealTimeNanos } ?: return
     if (last.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER) DriveService.start(c) else DriveService.stop(c)

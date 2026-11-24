@@ -36,19 +36,32 @@ class ApexDriveModule : Module() {
         "[]"
       } else {
         val active = Store.activeName(c)
-        val num = Regex("^[-0-9.,E]+$")
         val trips = (Store.dir(c).listFiles() ?: emptyArray())
           .filter { it.name.startsWith("trip_") && it.name != active }
           .sortedBy { it.name }
-          .map { f ->
-            // Son satır yarım kalmış olabilir (dosyanın sonu "\n" değilse), o yüzden atılır
-            val lines = f.readText().split("\n").dropLast(1).filter { ln -> ln.count { ch -> ch == ',' } == 5 && num.matches(ln) }
-            val veh = f.name.removeSuffix(".jsonl").split("_").getOrElse(2) { "v0" }
-            "{\"id\":\"${f.name}\",\"veh\":\"$veh\",\"pts\":[${lines.joinToString(",") { ln -> "[$ln]" }}]}"
-          }
+          .map { f -> Store.tripJson(f) }
         if (trips.isNotEmpty()) Diag.add(c, "uygulama " + trips.size + " kayit aldi") // TEŞHİS
         "[${trips.joinToString(",")}]"
       }
+    }
+
+    // Şu an süren otomatik kaydı uygulamaya devreder: servisi durdurur, o ana kadarki noktaları verir (yoksa ""). Dosyayı ackTrips siler.
+    AsyncFunction("takeActive") {
+      val c = appContext.reactContext
+      val name = if (c == null) "" else Store.activeName(c)
+      if (c == null || name.isEmpty()) {
+        ""
+      } else {
+        DriveService.stop(c)
+        Diag.add(c, "uygulama suren kaydi devraldi") // TEŞHİS
+        Store.tripJson(File(Store.dir(c), name))
+      }
+    }
+
+    // Uygulama sürüş kaydediyorken true: bu sırada "araçta" olayları yeni kayıt başlatmaz
+    AsyncFunction("setBusy") { on: Boolean ->
+      val c = appContext.reactContext ?: return@AsyncFunction
+      Store.prefs(c).edit().putBoolean("busy", on).apply()
     }
 
     // TEŞHİS: geçici algılama kaydını okur / satır ekler
