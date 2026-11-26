@@ -45,17 +45,19 @@ class ApexDriveModule : Module() {
       }
     }
 
-    // Şu an süren otomatik kaydı uygulamaya devreder: servisi durdurur, o ana kadarki noktaları verir (yoksa ""). Dosyayı ackTrips siler.
-    AsyncFunction("takeActive") {
+    // Süren otomatik kaydı okur, durdurmaz (yoksa ""). id verilen kayıtsa yalnızca from'dan sonraki yeni noktalar gelir.
+    AsyncFunction("getActive") { id: String, from: Int ->
       val c = appContext.reactContext
       val name = if (c == null) "" else Store.activeName(c)
-      if (c == null || name.isEmpty()) {
-        ""
-      } else {
-        DriveService.stop(c)
-        Diag.add(c, "uygulama suren kaydi devraldi") // TEŞHİS
-        Store.tripJson(File(Store.dir(c), name))
-      }
+      if (c == null || name.isEmpty()) "" else Store.tripJson(File(Store.dir(c), name), if (name == id) from else 0)
+    }
+
+    // Süren otomatik kaydı bitirir; dosya bitmiş sürüş olarak takeTrips ile alınır
+    AsyncFunction("stopActive") {
+      val c = appContext.reactContext ?: return@AsyncFunction
+      Store.prefs(c).edit().putBoolean("rec", false).commit()
+      DriveService.stop(c)
+      Diag.add(c, "kayit uygulamadan bitirildi") // TEŞHİS
     }
 
     // Uygulama sürüş kaydediyorken true: bu sırada "araçta" olayları yeni kayıt başlatmaz

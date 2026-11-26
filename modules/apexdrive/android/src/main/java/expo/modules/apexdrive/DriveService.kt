@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.location.Location
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
@@ -22,18 +23,39 @@ import java.io.File
 import java.io.FileWriter
 
 // Araca binince başlar, noktaları "zaman,enlem,boylam,hız,doğruluk,yön" satırları olarak dosyaya yazar.
-// Araçtan inince (ya da 5 dk hareketsiz kalınca) durur; dosyayı uygulama açılınca okur.
+// 5 dk hareketsiz kalınca kaydı bitirir ama servisi kapatmaz: düşük güçle hareket bekler, hareket başlayınca yeni kayıt açar.
+// (Google "araçta" durumundan çıkmadıysa yeni "girdi" olayı göndermez, o yüzden servis bu sürede açık kalmalı.)
+// Araçtan inince ("çıktı" olayı) ya da 30 dk hareket olmazsa servis tamamen durur; dosyayı uygulama açılınca okur.
 class DriveService : Service() {
   private var client: FusedLocationProviderClient? = null
   private var out: FileWriter? = null
   private var lastMove = 0L
   private var pts = 0 // TEŞHİS
   private var bad = 0 // TEŞHİS
+  private var waiting = false
+  private var anchor: Location? = null
+  private var waitSince = 0L
 
   private val callback = object : LocationCallback() {
     override fun onLocationResult(r: LocationResult) {
-      val w = out ?: return
       val now = System.currentTimeMillis()
+      if (waiting) {
+        if (Store.prefs(this@DriveService).getBoolean("busy", false)) return // uygulama zaten sürüş kaydediyor
+        for (l in r.locations) {
+          val a = anchor
+          if (a == null) { anchor = l; continue }
+          if ((l.hasSpeed() && l.speed > 2.5f) || l.distanceTo(a) > 80f) {
+            beginRecording()
+            return
+          }
+        }
+        if (now - waitSince > WAIT_MS) {
+          Diag.add(this@DriveService, "30 dk hareket yok, servis durdu") // TEŞHİS
+          stopSelf()
+        }
+        return
+      }
+      val w = out ?: return
       for (l in r.locations) {
         if (l.accuracy > 50f) { bad++; continue }
         val speed = if (l.hasSpeed()) l.speed else -1f
@@ -44,30 +66,64 @@ class DriveService : Service() {
         if (speed > 1.5f) lastMove = now
       }
       w.flush()
-      if (now - lastMove > IDLE_MS) { Diag.add(this@DriveService, "5 dk hareketsiz, servis kendini durdurdu"); stopSelf() } // TEŞHİS
+      if (now - lastMove > IDLE_MS) startWaiting()
     }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     goForeground()
-    if (client != null) return START_STICKY
+    if (client == null) {
+      client = LocationServices.getFusedLocationProviderClient(this)
+      beginRecording()
+    } else if (waiting) {
+      beginRecording() // "araçta" olayı geldi: bekleme biter, kayıt başlar
+    }
+    return START_STICKY
+  }
+
+  // Yeni kayıt başlatır (süren yakın tarihli kayıt varsa ona devam eder)
+  private fun beginRecording() {
     val p = Store.prefs(this)
     var name = Store.activeName(this)
     if (name.isEmpty()) name = "trip_${System.currentTimeMillis()}_${p.getString("veh", "v0")}.jsonl"
     p.edit().putString("cur", name).putBoolean("rec", true).apply()
-    lastMove = System.currentTimeMillis()
+    try { out?.close() } catch (e: Exception) {}
     out = FileWriter(File(Store.dir(this), name), true)
-    Diag.add(this, "servis basladi") // TEŞHİS
-    val c = LocationServices.getFusedLocationProviderClient(this)
-    client = c
-    val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).setMinUpdateIntervalMillis(1000L).build()
+    waiting = false
+    anchor = null
+    pts = 0
+    bad = 0
+    lastMove = System.currentTimeMillis()
+    Diag.add(this, "kayit basladi") // TEŞHİS
+    goForeground()
+    requestUpdates(true)
+  }
+
+  // Kaydı bitirir, servisi açık tutup düşük güçle hareket bekler
+  private fun startWaiting() {
+    try { out?.close() } catch (e: Exception) {}
+    out = null
+    Store.prefs(this).edit().putBoolean("rec", false).apply()
+    Diag.add(this, "5 dk hareketsiz, kayit bitti, hareket bekleniyor: " + pts + " nokta, " + bad + " zayif konum atildi") // TEŞHİS
+    waiting = true
+    anchor = null
+    waitSince = System.currentTimeMillis()
+    goForeground()
+    requestUpdates(false)
+  }
+
+  private fun requestUpdates(high: Boolean) {
+    val req = if (high) {
+      LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L).setMinUpdateIntervalMillis(1000L).build()
+    } else {
+      LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 5000L).setMinUpdateIntervalMillis(3000L).build()
+    }
     try {
-      c.requestLocationUpdates(req, callback, Looper.getMainLooper())
+      client?.requestLocationUpdates(req, callback, Looper.getMainLooper())
     } catch (e: SecurityException) {
       Diag.add(this, "konum izni yok, servis durdu") // TEŞHİS
       stopSelf()
     }
-    return START_STICKY
   }
 
   private fun goForeground() {
@@ -78,7 +134,7 @@ class DriveService : Service() {
     val n = NotificationCompat.Builder(this, CH)
       .setSmallIcon(icon)
       .setContentTitle("ApexDrive")
-      .setContentText("Sürüşün kaydediliyor")
+      .setContentText(if (waiting) "Sürüş bekleniyor" else "Sürüşün kaydediliyor")
       .setOngoing(true)
       .setContentIntent(open)
       .build()
@@ -101,6 +157,7 @@ class DriveService : Service() {
     private const val CH = "apexdrive_drive"
     private const val NID = 4107
     private const val IDLE_MS = 300000L
+    private const val WAIT_MS = 1800000L
     fun start(c: Context) { ContextCompat.startForegroundService(c, Intent(c, DriveService::class.java)) }
     fun stop(c: Context) { c.stopService(Intent(c, DriveService::class.java)) }
   }

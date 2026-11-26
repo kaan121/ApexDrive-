@@ -16,13 +16,13 @@ object Store {
   fun prefs(c: Context) = c.getSharedPreferences("apexdrive_native", Context.MODE_PRIVATE)
   fun dir(c: Context): File = File(c.filesDir, "apexdrive_trips").apply { mkdirs() }
 
-  // Kayıt dosyasını uygulamanın okuyacağı JSON'a çevirir: {id, veh, pts: [[zaman, enlem, boylam, hız, doğruluk, yön], ...]}
-  fun tripJson(f: File): String {
+  // Kayıt dosyasını uygulamanın okuyacağı JSON'a çevirir: {id, veh, n: toplam nokta, pts: [from'dan sonraki noktalar: [zaman, enlem, boylam, hız, doğruluk, yön]]}
+  fun tripJson(f: File, from: Int = 0): String {
     val num = Regex("^[-0-9.,E]+$")
     // Son satır yarım kalmış olabilir (dosyanın sonu "\n" değilse), o yüzden atılır
     val lines = f.readText().split("\n").dropLast(1).filter { ln -> ln.count { ch -> ch == ',' } == 5 && num.matches(ln) }
     val veh = f.name.removeSuffix(".jsonl").split("_").getOrElse(2) { "v0" }
-    return "{\"id\":\"${f.name}\",\"veh\":\"$veh\",\"pts\":[${lines.joinToString(",") { ln -> "[$ln]" }}]}"
+    return "{\"id\":\"${f.name}\",\"veh\":\"$veh\",\"n\":${lines.size},\"pts\":[${lines.drop(from).joinToString(",") { ln -> "[$ln]" }}]}"
   }
 
   // Şu an kaydı süren sürüşün dosya adı (yoksa boş). Sistem servisi öldürüp bayrak açık kalırsa 10 dk sonra eski sayılır.
