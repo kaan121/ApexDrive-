@@ -217,10 +217,11 @@ function buildTrip(d, interrupted) {
   t.score = driveScore(t); t.scoreV = 2;
   return t;
 }
-// Yerel modülün kaydettiği noktaları [zaman, enlem, boylam, hız, doğruluk, yön] canlı sürüşle aynı hesaptan geçirip sürüş kaydını döndürür
-function replayPoints(ps, veh) {
-  const prev = { R, onTick, lastSave, driving }, d = fresh(veh);
-  d.t0 = ps[0][0]; d.auto = true;
+let AR = null; // Sürüş ekranında canlı gösterilen otomatik kaydın hesabı
+// Yerel modülün kaydettiği noktaları [zaman, enlem, boylam, hız, doğruluk, yön] canlı sürüşle aynı hesaptan geçirir (d0 verilirse onun üstüne ekler)
+function replayPoints(ps, veh, d0) {
+  const prev = { R, onTick, lastSave, driving }, d = d0 || fresh(veh);
+  if (!d0) { d.t0 = ps[0][0]; d.auto = true; }
   R = d; driving = true; onTick = null; lastSave = Infinity; // hesap sırasında ekran güncellenmesin, diske yazılmasın
   try { ps.forEach((p) => processLoc({ timestamp: p[0], coords: { latitude: p[1], longitude: p[2], speed: p[3] >= 0 ? p[3] : null, accuracy: p[4], heading: p[5] >= 0 ? p[5] : -1 } })); }
   finally { driving = prev.driving; R = prev.R; onTick = prev.onTick; lastSave = prev.lastSave; }
@@ -3205,7 +3206,7 @@ function SettingsModal({ prefs, setPrefs, onClose, autoCheck, username, email, o
     drive: (
       <>
       {!!ND && (
-        <Box title="Otomatik sürüş kaydı" sub={`Telefon araçta olduğunu algılayınca sürüş kaydı kendiliğinden başlar. Uygulama kapalıyken de çalışır. Uygulamayı açtığında süren sürüş Sürüş ekranında canlı görünür ve istersen sen bitirirsin; açmazsan araçtan inince kendiliğinden biter ve listeye eklenir. Konum izninin "Her zaman izin ver" ve Fiziksel aktivite izninin açık olmasını ister.`}>
+        <Box title="Otomatik sürüş kaydı" sub={`Telefon araçta olduğunu algılayınca sürüş kaydı kendiliğinden başlar. Uygulama kapalıyken de çalışır. Uygulamayı açtığında süren sürüş Sürüş ekranında canlı görünür. İstersen sen bitirirsin, bitirmezsen araçtan inince kendiliğinden biter ve listeye eklenir. Konum izninin "Her zaman izin ver" ve Fiziksel aktivite izninin açık olmasını ister.`}>
           <Chips opts={[['Kapalı', false], ['Açık', true]]} val={!!prefs.auto} onPick={(v) => onAuto(v)} />
         </Box>
       )}
@@ -3530,7 +3531,7 @@ function AppInner({ ready }) {
   const eff = prefs.theme === 'system' ? (sysScheme === 'light' ? 'light' : 'dark') : prefs.theme;
   if (curTheme !== eff) { curTheme = eff; C = eff === 'light' ? LIGHT : DARK; s = mk(); }
   const [menu, setMenu] = useState(false), [screen, setScreen] = useState(null), [cellStore, setCellStore] = useState([]);
-  const pLoaded = useRef(false), tripsReady = useRef(false), importing = useRef(false), uiReady = useRef(false);
+  const pLoaded = useRef(false), tripsReady = useRef(false), importing = useRef(false), uiReady = useRef(false), autoGen = useRef(0), ar = useRef({ id: '', n: 0 });
   const [pReady, setPReady] = useState(false);
   const [dlg, setDlg] = useState(null);
   Dlg.show = setDlg;
@@ -3556,7 +3557,7 @@ function AppInner({ ready }) {
   useEffect(() => {
     loadTrips().then(({ list, blocked }) => {
       setTrips(list); const rd = resumeDrive(list);
-      if (!blocked) rd.finally(() => { tripsReady.current = true; adoptAuto().finally(importAuto); });
+      if (!blocked) rd.finally(() => { tripsReady.current = true; importAuto(); });
       if (blocked) AlertX.alert('Sürüş kayıtları okunamadı', 'Kayıtların korunması için yeni sürüşler bu oturumda kaydedilmeyecek. Lütfen uygulamayı yeniden başlat; sorun sürerse bize bildir.');
     });
     AsyncStorage.getItem(PKEY).then((v) => setProfile(v ? initGarage(JSON.parse(v)) : null)).catch(() => setProfile(null));
@@ -3645,38 +3646,55 @@ function AppInner({ ready }) {
 
   // Yerel modülün kaydettiği otomatik sürüşleri listeye ekler. Diskteki kayıt, liste diske yazıldıktan sonra silinir.
   const importAuto = async () => {
-    if (!ND || driving || !tripsReady.current || importing.current) return;
+    if (!ND || driving || !tripsReady.current || importing.current) return [];
     importing.current = true;
     try {
       const raw = JSON.parse(await ND.takeTrips());
-      if (!raw.length || driving) return;
+      if (!raw.length || driving) return [];
       const ids = raw.map((x) => x.id), made = raw.map((x) => tripFromPoints(x.pts, x.veh)).filter(Boolean);
-      if (!made.length) { ND.ackTrips(ids); return; }
+      if (!made.length) { ND.ackTrips(ids); return []; }
       setTrips((p) => { const have = new Set(p.map((t) => t.id)), n = [...made.filter((t) => !have.has(t.id)), ...p].sort((a, b) => b.start - a.start); persistTrips(n).then((ok) => ok && ND.ackTrips(ids)); return n; });
       setToast(`🚗 ${made.length} sürüş otomatik kaydedildi`); setTimeout(() => setToast(''), 2800);
-    } catch {} finally { importing.current = false; }
+      return made;
+    } catch { return []; } finally { importing.current = false; }
   };
 
-  // Uygulama açıkken yerel modül bir sürüş kaydediyorsa onu devralır: Sürüş ekranında canlı görünür, bitirmeyi sen yaparsın.
-  const adoptAuto = async () => {
-    if (!ND || driving || !tripsReady.current || !uiReady.current || importing.current || AppState.currentState !== 'active') return;
-    importing.current = true;
+  // Yerel modül bir sürüş kaydediyorsa Sürüş ekranında canlı gösterir (kayıt yerel modülde sürer, kendiliğinden bitmesi korunur)
+  const zero = { speed: 0, dist: 0, max: 0, g: 0, secs: 0 };
+  const pollAuto = async () => {
+    if (!ND || driving || !tripsReady.current || !uiReady.current || AppState.currentState !== 'active') return;
+    const gen = autoGen.current;
     try {
-      const raw = await ND.takeActive();
-      if (!raw) return;
+      const raw = await ND.getActive(ar.current.id, ar.current.n);
+      if (gen !== autoGen.current) return;
+      if (!raw) { // kayıt bitti (araçtan indi ya da hareketsiz kaldı): ekranı kapat, bitmiş sürüşü listeye al
+        if (ar.current.id) { AR = null; ar.current = { id: '', n: 0 }; setOn(false); setLive(zero); setRoute([]); importAuto(); }
+        return;
+      }
       const a = JSON.parse(raw);
-      if (!a.pts || a.pts.length < 2 || driving) return; // dosya kalır, bitince normal içe aktarma alır
-      R = replayPoints(a.pts, a.veh); driving = true; lastSave = 0; endedT0 = 0;
-      await persistDrive(true);
-      if (!(await startTracking())) { driving = false; AsyncStorage.removeItem(DKEY).catch(() => {}); return; }
-      ND.ackTrips([a.id]); setBusy(true); reflectDrive();
-      setToast('🚗 Otomatik sürüş devam ediyor'); setTimeout(() => setToast(''), 2800);
-    } catch {} finally { importing.current = false; }
+      if (a.id !== ar.current.id) { AR = null; ar.current = { id: a.id, n: 0 }; }
+      if (a.pts.length) AR = replayPoints(a.pts, a.veh, AR);
+      ar.current = { id: a.id, n: a.n };
+      if (!AR) return;
+      setOn(true);
+      setLive({ speed: AR.last ? AR.last.v * 3.6 : 0, dist: AR.dist, max: AR.max, g: AR.maxG, secs: (Date.now() - AR.t0) / 1000 });
+      setRoute(AR.route.slice());
+    } catch (e) { if (ND.addLog) ND.addLog('canli izleme hatasi: ' + String((e && e.message) || e)).catch(() => {}); } // TEŞHİS
+  };
+  // Canlı gösterilen otomatik kaydı kullanıcı bitirir
+  const stopAuto = async () => {
+    autoGen.current++;
+    try { await ND.stopActive(); } catch {}
+    AR = null; ar.current = { id: '', n: 0 };
+    setOn(false); setLive(zero); setRoute([]);
+    for (let i = 0; i < 20 && importing.current; i++) await new Promise((r) => setTimeout(r, 100));
+    const made = await importAuto();
+    if (made && made.length) { setTab('profile'); setShareTrip(made[0]); } else AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
   };
 
   const start = async () => {
     if (driving) return reflectDrive();
-    if (ND) { await adoptAuto(); if (driving) return; } // çalışan otomatik kayıt varsa ikinci kayıt açma, onu devral
+    if (ar.current.id) return; // otomatik kayıt canlı gösteriliyor, ikinci kayıt açma
     vidRef.current = (profile && profile.vid) || 'v0';
     const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') return AlertX.alert('Konum izni gerekli', 'Sürüşü takip edebilmek için ayarlardan konum iznini aç.');
@@ -3700,6 +3718,7 @@ function AppInner({ ready }) {
   };
 
   const stop = async () => {
+    if (ar.current.id) return stopAuto();
     const d = R;
     driving = false; endedT0 = d.t0; // geç gelen konum noktaları artık işlenmez
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
@@ -3709,7 +3728,7 @@ function AppInner({ ready }) {
     onRef.current = false; setOn(false);
     if (pending.current && pending.current.length) setAsk({ list: pending.current });
     pending.current = null;
-    if (d.dist < (d.auto ? 0.3 : 0.05) || (d.auto && d.max < 20)) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
+    if (d.dist < 0.05) return AlertX.alert('Sürüş çok kısa', 'Kaydedilecek kadar mesafe alınmadı.');
     const t = finishTrip(d, trips, false);
     setTab('profile');
     setShareTrip(t);
@@ -3853,7 +3872,7 @@ function AppInner({ ready }) {
   }, [docsBy, rem, vehicles.length, ready]);
   tabRef.current = tab;
   uiReady.current = !!profile && acct === 'in';
-  useEffect(() => { if (!ND) return; const id = setInterval(adoptAuto, 5000); return () => clearInterval(id); }, []);
+  useEffect(() => { if (!ND) return; const id = setInterval(pollAuto, 2000); return () => clearInterval(id); }, []);
   useEffect(() => {
     if (!pReady || !profile || !ready) return;
     AsyncStorage.getItem(NKEY).then((v) => {
@@ -3873,7 +3892,7 @@ function AppInner({ ready }) {
     });
     return () => sub.remove();
   }, []);
-  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') { notifyUpdate(); if (driving) reflectDrive(); adoptAuto().finally(importAuto); } else persistDrive(true); }); return () => sub.remove(); }, []);
+  useEffect(() => { const sub = AppState.addEventListener('change', (x) => { if (x === 'active') { notifyUpdate(); if (driving) reflectDrive(); pollAuto(); importAuto(); } else persistDrive(true); }); return () => sub.remove(); }, []);
   useEffect(() => { AsyncStorage.getItem(LKEY).then((v) => v && setLaunches(JSON.parse(v))).catch(() => {}); }, []);
   const saveLaunch = (r) => setLaunches((p) => { const n = [r, ...p].slice(0, 200); AsyncStorage.setItem(LKEY, JSON.stringify(n)).catch(() => {}); return n; });
   useEffect(() => { if (pReady && ready) scheduleDaily(prefs, trips); }, [pReady, ready, prefs.daily, trips.length]);
