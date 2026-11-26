@@ -54,10 +54,13 @@ class ApexDriveModule : Module() {
 
     // Süren otomatik kaydı bitirir; dosya bitmiş sürüş olarak takeTrips ile alınır
     AsyncFunction("stopActive") {
-      val c = appContext.reactContext ?: return@AsyncFunction
-      Store.prefs(c).edit().putBoolean("rec", false).commit()
-      DriveService.stop(c)
-      Diag.add(c, "kayit uygulamadan bitirildi") // TEŞHİS
+      val c = appContext.reactContext
+      if (c != null) {
+        Store.prefs(c).edit().putBoolean("rec", false).commit()
+        DriveService.stop(c)
+        Diag.add(c, "kayit uygulamadan bitirildi") // TEŞHİS
+      }
+      true
     }
 
     // Uygulama sürüş kaydediyorken true: bu sırada "araçta" olayları yeni kayıt başlatmaz
