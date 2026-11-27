@@ -1046,7 +1046,7 @@ function LaunchScreen({ vehicle, runs, onSave, onClose }) {
   }
   useEffect(() => {
     let alive = true;
-    Location.watchPositionAsync({ accuracy: Location.Accuracy.BestForNavigation, timeInterval: 100, distanceInterval: 0 }, (loc) => {
+    const onLoc = (loc) => {
       if (!alive || loc.coords.accuracy > 30) return;
       const v = Math.max(0, (loc.coords.speed != null && loc.coords.speed >= 0 ? loc.coords.speed : 0) * 3.6);
       vref.current = v; setSpd(v);
@@ -1055,8 +1055,17 @@ function LaunchScreen({ vehicle, runs, onSave, onClose }) {
         if (st.phase === 'run' && ph.current === 'armed') { setP('run'); t0.current = Date.now() - (loc.timestamp - st.t0); }
         if (st.phase === 'done') finish(st);
       }
-    }).then((x) => { if (alive) sub.current = x; else x.remove(); }).catch(() => {});
-    return () => { alive = false; if (sub.current) sub.current.remove(); clearInterval(tick.current); clearInterval(run.current); };
+    };
+    const stopW = () => { if (sub.current && sub.current.remove) sub.current.remove(); sub.current = null; };
+    const startW = () => {
+      if (sub.current || !alive) return;
+      sub.current = {}; // başlatılıyor
+      Location.watchPositionAsync({ accuracy: Location.Accuracy.BestForNavigation, timeInterval: 100, distanceInterval: 0 }, onLoc).then((x) => { if (alive && sub.current) sub.current = x; else x.remove(); }).catch(() => { sub.current = null; });
+    };
+    // Ölçüm sürmüyorsa uygulama arka plana geçince konum okumayı durdur (pil), geri gelince aynı ayarlarla başlat
+    const as = AppState.addEventListener('change', (x) => { if (x === 'active') startW(); else if (ph.current === 'idle' || ph.current === 'done') stopW(); });
+    if (AppState.currentState === 'active') startW();
+    return () => { alive = false; stopW(); as.remove(); clearInterval(tick.current); clearInterval(run.current); };
   }, []);
   useEffect(() => {
     clearInterval(run.current);
@@ -1449,7 +1458,7 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
     const load = async () => {
       try {
         const b = `lat=gte.${me.latitude - 1.2}&lat=lte.${me.latitude + 1.2}&lon=gte.${me.longitude - 1.2}&lon=lte.${me.longitude + 1.2}`;
-        const pr = await (await api(`presence?${b}&updated_at=gte.${new Date(Date.now() - 900000).toISOString()}&select=username,lat,lon,car`)).json();
+        const pr = await (await api(`presence?${b}&select=username,lat,lon,car`)).json();
         const st = await (await api(`stories?${b}&created_at=gte.${new Date(Date.now() - 864e5).toISOString()}&select=username,lat,lon,caption`)).json();
         const parse = (c) => { try { const j = JSON.parse(c); return j && typeof j === 'object' ? j : {}; } catch { return {}; } };
         const m = {};
@@ -1460,11 +1469,18 @@ function MapTab({ route, cells, on, region, regions, name, profile, totalKm, pre
     };
     load(); const id = setInterval(load, 30000); return () => clearInterval(id);
   }, [mode, !!me]);
-  useEffect(() => {
-    let sub;
-    Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 10 }, (l) => setMe({ latitude: l.coords.latitude, longitude: l.coords.longitude }))
-      .then((x) => { sub = x; }).catch(() => {});
-    return () => sub?.remove();
+  useEffect(() => { // konum izleme sadece uygulama ön plandayken açık kalır (arka planda pil harcamasın)
+    let sub = null, alive = true;
+    const stopW = () => { if (sub && sub.remove) sub.remove(); sub = null; };
+    const startW = () => {
+      if (sub || !alive) return;
+      sub = {}; // başlatılıyor
+      Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 10 }, (l) => setMe({ latitude: l.coords.latitude, longitude: l.coords.longitude }))
+        .then((x) => { if (alive && sub) sub = x; else x.remove(); }).catch(() => { sub = null; });
+    };
+    const as = AppState.addEventListener('change', (x) => { if (x === 'active') startW(); else stopW(); });
+    if (AppState.currentState === 'active') startW();
+    return () => { alive = false; stopW(); as.remove(); };
   }, []);
   useEffect(() => { if (me && !seen) { setSeen(true); onPan(me.latitude, me.longitude); } }, [me]);
   return (
@@ -2347,11 +2363,47 @@ async function openClubFile(p) {
 }
 const fileMeta = (p) => { try { return JSON.parse(p.meta || '{}'); } catch { return {}; } };
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+// Parmakla yakınlaştırma: iki parmakla büyüt/küçült, büyükken sürükle. Büyütülmemişken dokunuşları üst bileşene bırakır.
+function ZoomImage({ uri, w, h, onZoom }) {
+  const st = useRef({ s: 1, x: 0, y: 0 }).current, g = useRef({ n: 0 }).current, P = useRef({}), [, bump] = useState(0);
+  P.current = { onZoom, w, h };
+  const cen = (e) => {
+    const t = e.nativeEvent.touches || [], n = t.length;
+    if (!n) return null;
+    let x = 0, y = 0; t.forEach((q) => { x += q.pageX; y += q.pageY; });
+    return { x: x / n, y: y / n, n, d: n > 1 ? Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY) : 0 };
+  };
+  const base = (c) => { g.n = c.n; g.cx = c.x; g.cy = c.y; g.d = c.d; g.s = st.s; g.sx = st.x; g.sy = st.y; };
+  const end = () => { if (st.s < 1.02) { st.s = 1; st.x = 0; st.y = 0; bump((v) => v + 1); P.current.onZoom && P.current.onZoom(false); } };
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: (e) => e.nativeEvent.touches.length > 1 || st.s > 1,
+    onMoveShouldSetPanResponder: (e) => e.nativeEvent.touches.length > 1 || st.s > 1,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderGrant: (e) => { const c = cen(e); if (c) base(c); P.current.onZoom && P.current.onZoom(true); },
+    onPanResponderMove: (e) => {
+      const c = cen(e);
+      if (!c) return;
+      if (c.n !== g.n) base(c);
+      if (c.n > 1 && g.d > 0) st.s = Math.max(1, Math.min(5, g.s * (c.d / g.d)));
+      const mx = (P.current.w * (st.s - 1)) / 2, my = (P.current.h * (st.s - 1)) / 2;
+      st.x = Math.max(-mx, Math.min(mx, g.sx + (c.x - g.cx))); st.y = Math.max(-my, Math.min(my, g.sy + (c.y - g.cy)));
+      bump((v) => v + 1);
+    },
+    onPanResponderRelease: end,
+    onPanResponderTerminate: end,
+  })).current;
+  return (
+    <View {...pan.panHandlers} style={{ width: w, height: h, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }}>
+      <Image source={{ uri }} style={{ width: w, height: h, transform: [{ translateX: st.x }, { translateY: st.y }, { scale: st.s }] }} resizeMode="contain" />
+    </View>
+  );
+}
 function MediaImg({ id, style, contain, onPress, onLong }) {
   const [u, setU] = useState(mcache.get(id) || null);
   useEffect(() => { if (!u) loadMedia(id).then(setU).catch(() => {}); }, [id]);
-  const img = u ? <Image source={{ uri: u }} style={style} resizeMode={contain ? 'contain' : 'cover'} /> : <View style={[style, { backgroundColor: C.line, alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={C.accent} /></View>;
-  return onPress || onLong ? <TouchableOpacity onPress={onPress ? () => onPress(u) : undefined} onLongPress={onLong} delayLongPress={350}>{img}</TouchableOpacity> : img;
+  const tap = !!(onPress || onLong), box = tap ? { width: '100%', height: '100%', borderRadius: (StyleSheet.flatten(style) || {}).borderRadius } : style;
+  const img = u ? <Image source={{ uri: u }} style={box} resizeMode={contain ? 'contain' : 'cover'} /> : <View style={[box, { backgroundColor: C.line, alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={C.accent} /></View>;
+  return tap ? <TouchableOpacity style={style} onPress={onPress ? () => onPress(u) : undefined} onLongPress={onLong} delayLongPress={350}>{img}</TouchableOpacity> : img;
 }
 function Linkify({ text, style, onLong }) {
   const parts = String(text || '').split(/(https?:\/\/[^\s]+)/g);
@@ -2432,7 +2484,7 @@ function ClubMedia({ club, onClose }) {
             </TouchableOpacity>
           ))}
         </ScrollView>
-        {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
+        {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><ZoomImage uri={big} w={Dimensions.get('window').width - 48} h={Dimensions.get('window').height * 0.8} /></TouchableOpacity></Modal>}
       </SafeAreaView>
     </Modal>
   );
@@ -2947,7 +2999,7 @@ function ClubView({ club: club0, me, onBack }) {
       {stk && <StickerSheet onClose={() => setStk(false)} onPick={(r) => { setStk(false); send(r); }} />}
       {set && <ClubSettings club={club} me={me} mem={mem} setClub={setClub} bg={bg} setBg={setBg} onClose={() => setSet(false)} onChanged={load} onLeft={() => { setSet(false); onBack(); }} />}
       {evOpen && <EventsSheet club={club} me={me} staff={staff} evs={evs} reload={loadEvents} onClose={() => setEvOpen(false)} />}
-      {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><Image source={{ uri: big }} style={{ width: '100%', height: '80%' }} resizeMode="contain" /></TouchableOpacity></Modal>}
+      {big && <Modal visible transparent animationType="fade" onRequestClose={() => setBig(null)}><TouchableOpacity activeOpacity={1} style={[s.modalBg, { backgroundColor: '#000' }]} onPress={() => setBig(null)}><ZoomImage uri={big} w={Dimensions.get('window').width - 48} h={Dimensions.get('window').height * 0.8} /></TouchableOpacity></Modal>}
     </View>
   );
 }
@@ -3331,15 +3383,15 @@ function DialogHost({ dlg, onClose }) {
 // ---- Fotoğraf görüntüleyici ----
 function PhotoViewer({ photos, start, onClose, onDelete }) {
   const { width: W, height: H } = Dimensions.get('window');
-  const [i, setI] = useState(start);
+  const [i, setI] = useState(start), [zoom, setZoom] = useState(false);
   useEffect(() => { if (photos.length === 0) onClose(); }, [photos.length]);
   return (
     <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <View style={{ flex: 1, backgroundColor: '#000' }}>
-        <FlatList data={photos} horizontal pagingEnabled showsHorizontalScrollIndicator={false} initialScrollIndex={Math.min(start, Math.max(0, photos.length - 1))} keyExtractor={(u) => u}
+        <FlatList data={photos} horizontal pagingEnabled scrollEnabled={!zoom} showsHorizontalScrollIndicator={false} initialScrollIndex={Math.min(start, Math.max(0, photos.length - 1))} keyExtractor={(u) => u}
           getItemLayout={(_, k) => ({ length: W, offset: W * k, index: k })}
           onMomentumScrollEnd={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / W))}
-          renderItem={({ item }) => <View style={{ width: W, height: H, justifyContent: 'center' }}><Image source={{ uri: item }} style={{ width: W, height: H * 0.8 }} resizeMode="contain" /></View>} />
+          renderItem={({ item }) => <View style={{ width: W, height: H, justifyContent: 'center' }}><ZoomImage uri={item} w={W} h={H * 0.8} onZoom={setZoom} /></View>} />
         <View style={s.pvTop}>
           <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>{Math.min(i, photos.length - 1) + 1} / {photos.length}</Text>
           <View style={{ flexDirection: 'row', gap: 22 }}>
@@ -3718,7 +3770,7 @@ function AppInner({ ready }) {
   };
 
   const stop = async () => {
-    if (ar.current.id) return stopAuto();
+    if (ar.current.id) return AlertX.alert('Sürüş bitirilsin mi?', 'Otomatik kaydedilen sürüş şimdi bitirilecek.', [{ text: 'Vazgeç', style: 'cancel' }, { text: 'Bitir', onPress: stopAuto }]);
     const d = R;
     driving = false; endedT0 = d.t0; // geç gelen konum noktaları artık işlenmez
     try { if (await Location.hasStartedLocationUpdatesAsync(TASK)) await Location.stopLocationUpdatesAsync(TASK); } catch {}
@@ -3806,6 +3858,7 @@ function AppInner({ ready }) {
     if (!online || !profile || !ready) return;
     if (!prefs.visible) { api(`presence?username=eq.${profile.username}`, { method: 'DELETE' }).catch(() => {}); return; }
     const push = async () => {
+      if (AppState.currentState !== 'active') return; // arka planda konum alma (pil); son konum sunucuda kalır, uygulama açılınca güncellenir
       try {
         let p;
         try { p = await Promise.race([Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }), new Promise((_, rj) => setTimeout(() => rj(0), 9000))]); } catch { p = await Location.getLastKnownPositionAsync(); }
@@ -3814,7 +3867,9 @@ function AppInner({ ready }) {
         await api('presence?on_conflict=username', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ username: profile.username, lat: +p.coords.latitude.toFixed(3), lon: +p.coords.longitude.toFixed(3), car: JSON.stringify({ car: profile.car ? `${profile.car.brand} ${profile.car.model}` : '', d: pl.d, c: pl.c }), updated_at: new Date().toISOString() }) });
       } catch {}
     };
-    push(); const id = setInterval(push, 120000); return () => clearInterval(id);
+    push(); const id = setInterval(push, 120000);
+    const as = AppState.addEventListener('change', (x) => { if (x === 'active') push(); });
+    return () => { clearInterval(id); as.remove(); };
   }, [prefs.visible, profile?.username, ready]);
   useEffect(() => {
     if (!ready || !profile || !online) return;
