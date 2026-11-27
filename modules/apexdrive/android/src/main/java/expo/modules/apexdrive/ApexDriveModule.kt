@@ -1,5 +1,6 @@
 package expo.modules.apexdrive
 
+import android.content.Intent
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -57,7 +58,7 @@ class ApexDriveModule : Module() {
       val c = appContext.reactContext
       if (c != null) {
         Store.prefs(c).edit().putBoolean("rec", false).commit()
-        DriveService.stop(c)
+        c.startService(Intent(c, DriveService::class.java).setAction(DriveService.ACTION_FINISH))
         Diag.add(c, "kayit uygulamadan bitirildi") // TEŞHİS
       }
       true

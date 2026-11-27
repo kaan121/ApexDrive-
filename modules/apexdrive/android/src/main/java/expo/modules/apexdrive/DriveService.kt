@@ -26,6 +26,7 @@ import java.io.FileWriter
 // 5 dk hareketsiz kalınca kaydı bitirir ama servisi kapatmaz: düşük güçle hareket bekler, hareket başlayınca yeni kayıt açar.
 // (Google "araçta" durumundan çıkmadıysa yeni "girdi" olayı göndermez, o yüzden servis bu sürede açık kalmalı.)
 // Araçtan inince ("çıktı" olayı) ya da 30 dk hareket olmazsa servis tamamen durur; dosyayı uygulama açılınca okur.
+// Kullanıcı uygulamadan bitirirse de servis kapanmaz, hareket beklemeye geçer (Google hâlâ "araçta" diyorsa yeni "girdi" olayı gelmez).
 class DriveService : Service() {
   private var client: FusedLocationProviderClient? = null
   private var out: FileWriter? = null
@@ -44,7 +45,8 @@ class DriveService : Service() {
         for (l in r.locations) {
           val a = anchor
           if (a == null) { anchor = l; continue }
-          if ((l.hasSpeed() && l.speed > 2.5f) || l.distanceTo(a) > 80f) {
+          // GPS sapmasını hareket sanmamak için mesafe, iki konumun belirsizliğinden büyük olmalı
+          if ((l.hasSpeed() && l.speed > 2.5f) || l.distanceTo(a) > Math.max(120f, a.accuracy + l.accuracy)) {
             beginRecording()
             return
           }
@@ -71,6 +73,11 @@ class DriveService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent?.action == ACTION_FINISH) { // kullanıcı uygulamadan bitirdi: kayıt biter ama servis hareket beklemeye geçer
+      if (client == null) { stopSelf(); return START_NOT_STICKY }
+      if (!waiting) startWaiting()
+      return START_STICKY
+    }
     goForeground()
     if (client == null) {
       client = LocationServices.getFusedLocationProviderClient(this)
@@ -154,6 +161,7 @@ class DriveService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   companion object {
+    const val ACTION_FINISH = "expo.modules.apexdrive.FINISH"
     private const val CH = "apexdrive_drive"
     private const val NID = 4107
     private const val IDLE_MS = 300000L
